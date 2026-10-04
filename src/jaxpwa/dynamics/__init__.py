@@ -33,6 +33,7 @@ from .lineshape import (
     energy_dependent_width,
     kallen,
 )
+from .polar_form_factor_nr import PolarFormFactorSymNR
 from .qmi2d import QMI2D, physical_bin_mask
 from .resonance import ResonanceAmplitude
 from .sequential import CascadeChain, Isobar, PairChain
@@ -50,6 +51,7 @@ __all__ = [
     "LASS",
     "Pole",
     "PipiKKRescattering",
+    "PolarFormFactorSymNR",
     "QMI",
     "QMI2D",
     "RelativisticBreitWigner",

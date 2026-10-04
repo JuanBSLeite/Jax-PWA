@@ -233,6 +233,16 @@ def test_reuse_rejects_stale_values_or_different_session(setup, fake_generator):
     assert plt.get_fignums() == []
 
 
+def test_reuse_rejects_generation_options(setup, fake_generator):
+    session, result = setup
+    toy = session.prepare_projection_toy(result, projection_size=50)
+    with pytest.raises(TypeError, match="ignored with projection_toy"):
+        session.plot_projection_from_toy(
+            result, projection_toy=toy, inverse_resolution=100
+        )
+    assert plt.get_fignums() == []
+
+
 def test_toy_does_not_keep_session_alive(setup, fake_generator):
     session, result = setup
     clone = replace(session)

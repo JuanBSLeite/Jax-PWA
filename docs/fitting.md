@@ -54,7 +54,7 @@ stage worsens the NLL. This prevents an unstable continuation from becoming
 the reported fit, but it does not turn a non-converged Nesterov endpoint into
 a valid statistical minimum; inspect `result.valid`, NLL, EDM, and covariance.
 
-In an event-weighted `FitSession.fit(weights=..., covariance="sandwich"|"sumw2")`,
+In an event-weighted `FitSession.fit` or `CPFitSession.fit(weights=..., covariance="sandwich"|"sumw2")`,
 a returned Nesterov endpoint has no covariance to correct: the session warns
 and skips the corrected covariance, as it already does for an invalid Minuit
 result.
@@ -224,7 +224,10 @@ This should be used when introducing a new dynamical parameter or lineshape.
 
 ## sWeight / COW Dalitz fits
 
-`FitSession.fit()` accepts per-event signal weights directly:
+`FitSession.fit()` accepts per-event signal weights directly
+(`CPFitSession.fit(weights=(plus_weights, minus_weights), ...)` is the joint
+B+/B- equivalent with the same covariance options; see
+[cp_coefficients.md](cp_coefficients.md#event-weighted-sweightcow-cp-fits)):
 
 ```python
 result = session.fit(

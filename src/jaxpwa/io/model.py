@@ -68,6 +68,7 @@ from ..dynamics import (
     GounarisSakurai,
     KMatrix,
     PipiKKRescattering,
+    PolarFormFactorSymNR,
     Pole,
     RelativisticBreitWigner,
     Rescattering2,
@@ -118,6 +119,7 @@ _REGISTRY: dict[str, type] = {
         ZemachPstar,
         GooFitLegacyAngular,
         QMI2D,
+        PolarFormFactorSymNR,
         RealImag,
         CPRealImag,
     )

@@ -32,7 +32,7 @@ nested `dataclass` built from those (tuples included) -- which covers every buil
 (`RelativisticBreitWigner`, `Pole`, `SigmaPole`, `GounarisSakurai`, `RhoOmegaMixing`,
 `PipiKKRescattering`, `Flatte`, `BaBarFlatte`, `LASS`, `KMatrix`, `QMI`, `Rescattering2`), every
 angular model (`CovariantAngular`, `ZemachP`/`ZemachPstar`, `GooFitLegacyAngular`), the coefficient
-classes (`RealImag`, `CPRealImag`), and `QMI2D` two-dimensional amplitudes. `SympyLineshape` is the
+classes (`RealImag`, `CPRealImag`), and the `QMI2D`/`PolarFormFactorSymNR` two-dimensional amplitudes. `SympyLineshape` is the
 one exception with genuinely non-trivial internal state (a compiled kernel derived from a SymPy
 expression tree); it already implements its own `to_spec()`/`from_spec()` pair (see
 `dynamics/lineshape/sympy.py`), and `export_model`/`import_model` dispatch to it automatically

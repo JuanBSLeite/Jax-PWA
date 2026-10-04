@@ -1574,6 +1574,17 @@ class PreparedAmplitudeCache:
             self.normalization_matrix(fit_values),
         )
 
+    def component_intensities(self, fit_values: Mapping[str, object]) -> Array:
+        """Per-component integrated intensities ``|c_k|^2 M_kk``.
+
+        The numerators of ``fit_fractions``, in the absolute scale of the
+        normalization matrix, so they compare across models sharing an
+        integration convention (e.g. the two charges of a CP fit).
+        """
+        coefficients = self.coefficient_vector(fit_values)
+        matrix = self.normalization_matrix(fit_values)
+        return jnp.real(jnp.conj(coefficients) * jnp.diag(matrix) * coefficients)
+
     def _fraction_jacobian_arrays(self):
         """Dynamic kernel inputs; no fitted-event arrays are needed."""
         return (
@@ -1586,8 +1597,14 @@ class PreparedAmplitudeCache:
             self.normalization_chunks,
         )
 
-    def _build_fraction_jacobian_kernel(self, parameter_names):
-        """Compile reusable sequential VJP rows without retaining sample arrays."""
+    def _build_fraction_jacobian_kernel(self, parameter_names, quantity="fit_fractions"):
+        """Compile reusable sequential VJP rows without retaining sample arrays.
+
+        ``quantity`` names the per-component cache method differentiated:
+        ``"fit_fractions"`` or ``"component_intensities"``.
+        """
+        if quantity not in ("fit_fractions", "component_intensities"):
+            raise ValueError("quantity must be 'fit_fractions' or 'component_intensities'")
         components = self.components
         parameters = self.parameters
         normalize = self.normalize_components
@@ -1617,7 +1634,7 @@ class PreparedAmplitudeCache:
             def fractions(vector):
                 patched = dict(values)
                 patched.update(zip(names, vector, strict=True))
-                return cache.fit_fractions(patched)
+                return getattr(cache, quantity)(patched)
 
             vector = jnp.asarray([values[name] for name in names], dtype=float)
             output, pullback = jax.vjp(fractions, vector)

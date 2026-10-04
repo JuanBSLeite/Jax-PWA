@@ -16,9 +16,10 @@ LASS(...)
 KMatrix(...)
 QMI(...)
 QMI2D(...)
+PolarFormFactorSymNR(...)
 ```
 
-One-dimensional isobar dynamics use the ordinary `lineshape(mass, context)` interface through `Resonance`. A genuinely two-dimensional Dalitz amplitude such as `QMI2D` is attached through `DalitzAmplitude` because it depends simultaneously on two invariant-mass-squared coordinates.
+One-dimensional isobar dynamics use the ordinary `lineshape(mass, context)` interface through `Resonance`. A genuinely two-dimensional Dalitz amplitude such as `QMI2D` or `PolarFormFactorSymNR` is attached through `DalitzAmplitude` because it depends simultaneously on two invariant-mass-squared coordinates.
 
 ## Relativistic Breit-Wigner
 
@@ -433,6 +434,39 @@ model = DecayModel(
 ```
 
 The global complex normalization/phase ambiguity remains present, just as for a 1D QMI, and a fit must fix an appropriate reference convention. A completely free two-dimensional field can also develop poorly constrained or null directions; closure tests and Hessian/correlation diagnostics are therefore essential before using it on data.
+
+## Polar form-factor nonresonant amplitude
+
+`PolarFormFactorSymNR` ports Laura++ `LauPolarFormFactorSymNR` (Nogueira et al., PRD 92, 054010
+(2015), modified for symmetric Dalitz plots). It is a real amplitude in the two invariants `s`, `t`
+that pair each identical particle with the third one, with a scale `lambda_` in GeV:
+
+```text
+PolarFFSymNR:        1/(1 + s/lambda^2) + 1/(1 + t/lambda^2)
+PolarFFSymNRNoInter: 1/(1 + min(s, t)/lambda^2)      (no_interference=True)
+```
+
+The sum of the two terms already is the identical-particle symmetrization, so it is attached through
+`DalitzAmplitude`, not `Resonance`. Laura++ uses `s = m13^2`, `t = m23^2` with the identical
+particles as tracks 1 and 2, which is the default `invariants=("s13", "s23")` for a channel ordered
+like `("K+", "K+", "K-")`; pass the other two invariant names for a different ordering. As in
+Laura++ there is no `1/sqrt(2)` or other overall normalization. Laura++'s default `lambda` is
+1.0 GeV, fixed, within [0, 10]; `lambda_` may be a `Parameter.dynamics(...)` to float it:
+
+```python
+lam = Parameter.dynamics("NR.lambda", 1.5845, owner="NR", fixed=True, bounds=(0.0, 10.0))
+DalitzAmplitude("NR", PolarFormFactorSymNR(lam), RealImag(1.0, 0.0))
+```
+
+The standalone call also resolves parameters, e.g.
+`PolarFormFactorSymNR(lam)(data, {"NR.lambda": 2.0})`. Evaluation uses the
+equivalent form `lambda^2 / (lambda^2 + s)` so the amplitude and its derivative
+have a finite zero limit at `lambda=0` for positive physical invariants.
+An initially configured numeric scale must be positive and finite. A zero
+scale cannot supply a unit-normalized component on its own. Floating scales
+must be `Parameter.dynamics` objects with the component owner, as for QMI
+nodes; a generic free `Parameter` would otherwise be silently fixed by the
+prepared cache and is rejected. Fixed generic parameters remain supported.
 
 ## QMI fit parameters and scale convention
 

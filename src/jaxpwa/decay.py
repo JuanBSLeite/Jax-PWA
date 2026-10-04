@@ -456,7 +456,7 @@ class DecayModel:
         normalization_order_m23: int | None = None,
         normalization_narrow_width: float = 0.020,
         normalization_narrow_window: float = 5.0,
-        normalization_binning_factor: float = 20.0, 
+        normalization_binning_factor: float = 100.0,
         normalization_sample: PhaseSpaceSample | None = None,
         normalization_chunk_size: int | str = "auto",
     ) -> None:
@@ -1050,13 +1050,25 @@ class DecayModel:
         integral = jnp.mean(sample.weights * jnp.abs(raw) ** 2)
         return 1.0 / jnp.sqrt(integral)
 
-    def amplitude(self, data, values=None):
-        """Coherent sum of every component's coefficient-scaled dynamics at `data`."""
-        total = None
+    def component_amplitudes(self, data, values=None) -> dict:
+        """Each component's coefficient-scaled amplitude at `data`, keyed by name.
+
+        The terms ``amplitude()`` sums coherently: ``|component|^2`` is the
+        incoherent contribution of one component (e.g. for drawing it on a
+        projection), and the coherent total minus the sum of these is the
+        interference.
+        """
+        result = {}
         for component in self.amplitude_model.components:
             dynamics = jnp.asarray(component.function(data, values))
             coefficient = jnp.asarray(coefficient_value(component.coefficient, values))
-            component_values = coefficient * self._component_scale(component, values) * dynamics
+            result[component.name] = coefficient * self._component_scale(component, values) * dynamics
+        return result
+
+    def amplitude(self, data, values=None):
+        """Coherent sum of every component's coefficient-scaled dynamics at `data`."""
+        total = None
+        for component_values in self.component_amplitudes(data, values).values():
             total = component_values if total is None else total + component_values
         return jnp.asarray(total)
 
@@ -1385,12 +1397,12 @@ class DecayModel:
             for index, component in enumerate(cache.components)
         }
 
-    def _fraction_jacobian(self, cache, values, parameter_names):
+    def _fraction_jacobian(self, cache, values, parameter_names, quantity="fit_fractions"):
         names = tuple(parameter_names)
-        key = (names, cache.normalize_components, cache._component_partitions())
+        key = (names, cache.normalize_components, cache._component_partitions(), quantity)
         kernel = self._fraction_jacobian_kernels.get(key)
         if kernel is None:
-            kernel = cache._build_fraction_jacobian_kernel(names)
+            kernel = cache._build_fraction_jacobian_kernel(names, quantity)
             self._fraction_jacobian_kernels[key] = kernel
         return kernel(values, cache._fraction_jacobian_arrays())
 

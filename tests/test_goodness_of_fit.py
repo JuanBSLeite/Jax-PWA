@@ -132,3 +132,17 @@ def test_point_to_point_rejects_bad_inputs():
         point_to_point_dissimilarity(
             data_xy, reference_xy, -np.ones(10), np.ones(20), phase_space_area=1.0
         )
+
+
+def test_observed_variance_replaces_the_poisson_denominator():
+    observed = np.array([10.0, 4.0, 7.0])
+    expected = np.array([8.0, 5.0, 0.0])
+    variance = np.array([12.0, 0.0, 3.0])
+    result = chi2_from_histograms(observed, expected, observed_variance=variance)
+    # Bin 2: no expectation; bin 1: no variance estimate -> both dropped.
+    assert result.n_bins == 1
+    assert result.chi2 == pytest.approx(4.0 / 12.0)
+    assert result.pulls[0] == pytest.approx(2.0 / np.sqrt(12.0))
+    assert np.isnan(result.pulls[1]) and np.isnan(result.pulls[2])
+    with pytest.raises(ValueError, match="observed_variance"):
+        chi2_from_histograms(observed, expected, observed_variance=np.ones(2))

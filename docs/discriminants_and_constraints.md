@@ -22,8 +22,33 @@ Available basic models are:
   convention), normalized on `[low, high]` in closed form (`erf` for the
   Gaussian half, the power law's elementary antiderivative for the tail) so
   it stays cheap and JAX-differentiable under a many-event unbinned
-  likelihood, unlike wrapping `scipy.stats.crystalball` directly;
+  likelihood, unlike wrapping `scipy.stats.crystalball` directly. The
+  power-law branch is evaluated only on its own domain (its argument is
+  clamped to `z <= -alpha` before the power); evaluating it at core points
+  beyond the pole `z = n/alpha - alpha` gave an infinite discarded value and
+  NaN gradients for every shape parameter whenever that pole lay inside the
+  fit range (small `n`, e.g. `n = 3`, `alpha = 1.5`);
+  A negative `alpha` puts the tail on the high side (the `RooCBShape`/LHCb
+  convention where the sign of `alpha` selects the side): the density is the
+  mirror image `z -> -z` with `|alpha|`. Tail powers are evaluated via
+  `log1p` after canceling their common scale, avoiding overflow of
+  `(n/|alpha|)^n` (e.g. `|alpha|=0.05`, `n=100` within the notebook bounds);
 - `Exponential1D(slope, low, high)`;
+- `Chebyshev1D(coefficients, low, high)` — `1 + sum_k c_k T_k(t)` on `t in [-1, 1]`
+  (`RooChebychev` convention), normalized in closed form; not positive by
+  construction. A coefficient point that makes the polynomial negative
+  anywhere on the interval returns NaN everywhere, allowing a
+  likelihood to reject it. The check includes endpoints and interior
+  stationary points, even when no data lie in the negative region. Valid
+  polynomials retain their analytic normalization and JAX derivatives;
+- `SumPDF1D(pdfs, fractions)` — recursive-fraction sum (the `RooAddPdf`
+  convention) `f1 p1 + (1-f1) f2 p2 + ... + (1-f1)...(1-f_{k-1}) p_k`, e.g. the
+  LHCb B -> hhh signal model (LHCb-ANA-2019-052, Eq. 7) Gaussian + left-tail
+  Crystal Ball + right-tail Crystal Ball as
+  `SumPDF1D((Gaussian1D(...), CrystalBall1D(..., a1, ...), CrystalBall1D(..., -|a2|, ...)), (fG, fCB))`.
+  Constant fractions must be finite and in `[0, 1]`; fitted fractions outside
+  this domain return NaN everywhere (so an invalid PDF cannot be masked by
+  another component of a larger mixture);
 - `Histogram1D(edges, values)`;
 - `FactorizedDensity(base_density, observables, pdfs)`.
 

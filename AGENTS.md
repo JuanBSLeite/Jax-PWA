@@ -82,8 +82,9 @@ through the low-level classes directly; see `docs/user_friendly_api.md` "Design 
 
 `Minimizer.fit(method="nesterov")` provides a projected, parameter-scaled
 Nesterov first-order fit. `method="nesterov-minuit"` runs that prefit before
-the existing Minuit strategy 1/2 stages. Invalid or worsened MIGRAD results
-are rejected, and a later stage cannot replace an earlier stage with a higher
+the existing Minuit strategy 1/2 stages. Non-finite or worsened continuations
+are rejected; an invalid continuation that does not raise the NLL is returned with
+its invalid status. A later stage cannot replace an earlier stage with a higher
 NLL. Nesterov-only results have no covariance and must not be used for
 uncertainty reporting without a separate Hessian calculation.
 

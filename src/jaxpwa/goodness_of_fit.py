@@ -108,6 +108,7 @@ def chi2_from_histograms(
     *,
     n_free_parameters: int = 0,
     edges: tuple[np.ndarray, ...] | None = None,
+    observed_variance=None,
 ) -> BinnedChi2Result:
     """Binned Pearson chi2 test between observed and expected bin counts.
 
@@ -120,6 +121,15 @@ def chi2_from_histograms(
     is ``nan``); a model that predicts zero density anywhere real data is
     observed is separately a sign of a badly-chosen model or binning, not
     something this function can average over.
+
+    ``observed_variance`` (same shape) replaces the Poisson variance
+    ``expected`` in each bin's denominator. For an event-weighted histogram
+    (sWeights/COW) pass the per-bin sum of squared weights: ``observed`` is
+    then the per-bin sum of weights and the statistic is
+    ``sum (observed - expected)^2 / sum(w^2)``. That variance is an estimate
+    from the bin's own events, so the chi2 distribution of the statistic is
+    asymptotic and needs well-populated bins; bins with a non-positive
+    variance are dropped like bins with ``expected <= 0``.
     """
 
     observed = np.asarray(observed, dtype=float)
@@ -129,16 +139,22 @@ def chi2_from_histograms(
     if n_free_parameters < 0:
         raise ValueError("n_free_parameters must be non-negative")
 
-    occupied = expected > 0
+    if observed_variance is None:
+        variance = expected
+    else:
+        variance = np.asarray(observed_variance, dtype=float)
+        if variance.shape != observed.shape:
+            raise ValueError("observed_variance must have the shape of observed")
+    occupied = (expected > 0) & (variance > 0)
     n_bins = int(np.sum(occupied))
     if n_bins == 0:
         raise ValueError("no bins with positive expected counts")
 
     residual = observed - expected
-    chi2 = float(np.sum(residual[occupied] ** 2 / expected[occupied]))
+    chi2 = float(np.sum(residual[occupied] ** 2 / variance[occupied]))
 
     pulls = np.full(observed.shape, np.nan)
-    pulls[occupied] = residual[occupied] / np.sqrt(expected[occupied])
+    pulls[occupied] = residual[occupied] / np.sqrt(variance[occupied])
 
     dof_min = n_bins - n_free_parameters - 1
     dof_max = n_bins - 1
