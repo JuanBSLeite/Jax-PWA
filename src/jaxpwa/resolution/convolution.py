@@ -2,13 +2,15 @@
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
-from typing import Mapping
 
 import jax.numpy as jnp
 import numpy as np
 from jax import Array
 from jax.scipy.special import erf
+
+from jaxpwa._quadrature import legendre_rule
 
 Parameters = Mapping[str, object]
 
@@ -23,7 +25,7 @@ def _gauss_legendre_nodes(low: float, high: float, order: int) -> tuple[Array, A
         raise ValueError("integration interval requires low < high")
     if order < 2:
         raise ValueError("Gauss-Legendre order must be at least two")
-    nodes, weights = np.polynomial.legendre.leggauss(order)
+    nodes, weights = legendre_rule(order)
     scale = 0.5 * (high - low)
     shift = 0.5 * (high + low)
     return jnp.asarray(scale * nodes + shift), jnp.asarray(scale * weights)
@@ -78,7 +80,7 @@ class GaussianResolution1D:
         true: Array,
         parameters: Parameters | None = None,
     ) -> Array:
-        """Probability for an event at ``true`` to reconstruct inside ``[low, high]``."""
+        """Probability to reconstruct an event at ``true`` inside ``[low, high]``."""
 
         if high <= low:
             raise ValueError("observed interval requires low < high")

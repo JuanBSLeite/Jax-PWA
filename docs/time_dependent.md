@@ -670,9 +670,11 @@ g_t(t)=\frac{\tau^{-1}e^{-t/\tau}}
 $$
 
 and draws Dalitz points from the model's phase-space generator. Candidate
-weights are formed from the session density, the observed-tag probability and
-the inverse proposal-time density. The candidates are then sampled with
-replacement. This is importance resampling: increasing `proposal_size` reduces
+weights are formed from the session density and inverse proposal-time density.
+The observed-tag probability is already present in the tag proposal, so it
+cancels from the importance ratio; applying it again would bias the requested
+tag fraction. The candidates are then sampled with replacement. This is
+importance resampling: increasing `proposal_size` reduces
 the finite-proposal approximation, but does not turn the method into an exact
 rejection sampler. Use a fixed `seed` for reproducible candidates and increase
 `proposal_size` when validating small mixing or narrow Dalitz structures.

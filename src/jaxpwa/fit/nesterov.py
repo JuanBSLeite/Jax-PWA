@@ -2,13 +2,18 @@
 
 from __future__ import annotations
 
+import weakref
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Callable, Mapping, Sequence
 
 import jax
 import jax.numpy as jnp
 import numpy as np
+
+# Consecutive accepted iterations without any NLL decrease before the run is
+# reported as ``status="stalled"``.
+STALL_ITERATIONS = 5
 
 
 @dataclass(frozen=True)
@@ -33,89 +38,222 @@ class NesterovResult:
         return SimpleNamespace(edm=float("nan"))
 
 
-def minimize(objective: Callable, parameters: Sequence, *,
-             start_values: Mapping[str, float] | None = None,
-             max_iter: int = 1000, gtol: float = 1e-4,
-             verbose: int = 0) -> NesterovResult:
-    """Run monotone projected Nesterov in parameter-scaled coordinates."""
-    if max_iter < 1 or gtol <= 0:
-        raise ValueError("max_iter must be positive and gtol must be positive")
-    supplied = {} if start_values is None else dict(start_values)
-    free = tuple(p for p in parameters if not p.fixed)
-    fixed = {p.name: float(p.value) for p in parameters if p.fixed}
-    origin = np.asarray([supplied.get(p.name, p.value) for p in free], dtype=float)
-    scales = np.asarray([p.step if p.step is not None else max(abs(float(origin[i])), 1.0)
-                         for i, p in enumerate(free)], dtype=float)
-    bounds = [p.bounds or (None, None) for p in free]
-    lower = np.asarray([(-np.inf if b[0] is None else b[0] - origin[i]) / scales[i]
-                        for i, b in enumerate(bounds)])
-    upper = np.asarray([(np.inf if b[1] is None else b[1] - origin[i]) / scales[i]
-                        for i, b in enumerate(bounds)])
+# Objectives own the lifetime of compiled solvers, as in the Minuit backend.
+_SOLVERS = {}
 
-    def scaled_nll(z):
-        physical = jnp.asarray(origin) + jnp.asarray(scales) * z
-        values = dict(fixed)
-        values.update({p.name: physical[i] for i, p in enumerate(free)})
-        return objective(values)
 
-    value_and_grad = jax.jit(jax.value_and_grad(scaled_nll))
-    x = np.zeros(len(free), dtype=float)
-    evaluations = 0
+def _build_solver(objective, names, fixed_names, max_iter, report_every):
+    def solve(origin, scales, fixed_values, lower, upper, gtol):
+        def scaled_nll(z):
+            physical = origin + scales * z
+            values = dict(zip(fixed_names, fixed_values, strict=True))
+            values.update({name: physical[i] for i, name in enumerate(names)})
+            return objective(values)
 
-    def evaluate(z):
-        nonlocal evaluations
-        f, g = jax.device_get(value_and_grad(jnp.asarray(z)))
-        evaluations += 1
-        return float(f), np.asarray(g, dtype=float)
+        evaluate = jax.value_and_grad(scaled_nll)
 
-    def residual(z, g):
-        return float(np.max(np.abs(z - np.clip(z - g, lower, upper))))
+        def residual(x, g):
+            return jnp.max(jnp.abs(x - jnp.clip(x - g, lower, upper)))
 
-    f, g = evaluate(x)
-    y, t, step = x.copy(), 1.0, 1.0
-    history = [{"iteration": 0, "nll": f, "projected_gradient": residual(x, g)}]
-    status = "max_iter"
-    for iteration in range(1, max_iter + 1):
-        if residual(x, g) <= gtol:
-            status = "converged"
-            break
-        accepted = False
-        for attempt in range(2):
-            yy = x if attempt else y
-            fy, gy = (f, g) if np.array_equal(yy, x) else evaluate(yy)
-            trial = step * 1.1
-            for _ in range(60):
-                candidate = np.clip(yy - trial * gy, lower, upper)
+        def search(yy, fy, gy, f, step):
+            def trial_body(state):
+                _, _, _, trial, count, _ = state
+                candidate = jnp.clip(yy - trial * gy, lower, upper)
                 delta = candidate - yy
                 fc, gc = evaluate(candidate)
                 majorant = fy + gy @ delta + delta @ delta / (2.0 * trial)
-                if (np.isfinite(fc) and np.all(np.isfinite(gc))
-                        and fc <= majorant + 1e-12 * max(1.0, abs(fy))
-                        and fc <= f):
-                    accepted = True
-                    break
-                trial *= 0.5
-            if accepted:
-                break
-        if not accepted:
-            status = "line_search_failed"
-            break
-        old_x, x, f, g, step = x, candidate, fc, gc, trial
-        t_next = (1.0 + np.sqrt(1.0 + 4.0 * t * t)) / 2.0
-        y = np.clip(x + (t - 1.0) / t_next * (x - old_x), lower, upper)
-        t = t_next
-        history.append({"iteration": iteration, "nll": f,
-                        "projected_gradient": residual(x, g)})
-        report_every = 50 if verbose == 2 else 10 if verbose >= 3 else None
-        if report_every is not None and iteration % report_every == 0:
-            print(f"[Nesterov] {iteration}: NLL={f:.9f}, "
-                  f"projected gradient={residual(x, g):.4g}", flush=True)
-    if residual(x, g) <= gtol:
-        status = "converged"
-    physical = origin + scales * x
+                accepted = (
+                    jnp.isfinite(fc)
+                    & jnp.all(jnp.isfinite(gc))
+                    & (fc <= majorant + 1e-12 * jnp.maximum(1.0, jnp.abs(fy)))
+                    & (fc <= f)
+                )
+                return (
+                    candidate,
+                    fc,
+                    gc,
+                    jnp.where(accepted, trial, trial * 0.5),
+                    count + 1,
+                    accepted,
+                )
+
+            return jax.lax.while_loop(
+                lambda state: (state[4] < 60) & ~state[5],
+                trial_body,
+                (yy, fy, gy, step * 1.1, jnp.int32(0), jnp.bool_(False)),
+            )
+
+        def iteration(state):
+            x, y, f, g, t, step, nfcn, i, stalled, status, history = state
+            same = jnp.all(y == x)
+            fy, gy = jax.lax.cond(same, lambda: (f, g), lambda: evaluate(y))
+            first = search(y, fy, gy, f, step)
+            second = jax.lax.cond(
+                first[5],
+                lambda: first,
+                lambda: search(x, f, g, f, step),
+            )
+            candidate, fc, gc, trial, count, accepted = second
+            nfcn += (~same).astype(jnp.int32) + first[4]
+            nfcn += jnp.where(first[5], 0, count)
+            stalled = jnp.where(fc >= f, stalled + 1, 0)
+            next_t = (1.0 + jnp.sqrt(1.0 + 4.0 * t * t)) / 2.0
+            next_y = jnp.clip(
+                candidate + (t - 1.0) / next_t * (candidate - x),
+                lower,
+                upper,
+            )
+            x = jnp.where(accepted, candidate, x)
+            f, g = jnp.where(accepted, fc, f), jnp.where(accepted, gc, g)
+            i += accepted.astype(jnp.int32)
+            r = residual(x, g)
+            history = jax.lax.cond(
+                accepted,
+                lambda h: h.at[i].set(jnp.stack((f, r))),
+                lambda h: h,
+                history,
+            )
+            # 0=max_iter/running, 1=line_search_failed, 2=stalled.
+            status = jnp.where(
+                accepted, jnp.where(stalled >= STALL_ITERATIONS, 2, 0), 1
+            ).astype(jnp.int32)
+            if report_every is not None:
+
+                def report():
+                    jax.debug.callback(
+                        lambda it, fv, rv: print(
+                            f"[Nesterov] {int(it)}: NLL={float(fv):.9f}, "
+                            f"projected gradient={float(rv):.4g}",
+                            flush=True,
+                        ),
+                        i,
+                        f,
+                        r,
+                    )
+
+                jax.lax.cond(accepted & (i % report_every == 0), report, lambda: None)
+            return (x, next_y, f, g, next_t, trial, nfcn, i, stalled, status, history)
+
+        x = jnp.zeros_like(origin)
+        f, g = evaluate(x)
+        history = jnp.zeros((max_iter + 1, 2), dtype=origin.dtype)
+        history = history.at[0].set(jnp.stack((f, residual(x, g))))
+        state = (
+            x,
+            x,
+            f,
+            g,
+            jnp.asarray(1.0),
+            jnp.asarray(1.0),
+            jnp.int32(1),
+            jnp.int32(0),
+            jnp.int32(0),
+            jnp.int32(0),
+            history,
+        )
+        state = jax.lax.while_loop(
+            lambda s: (s[7] < max_iter) & (s[9] == 0) & ~(residual(s[0], s[3]) <= gtol),
+            iteration,
+            state,
+        )
+        x, _, f, g, _, _, nfcn, i, _, status, history = state
+        status = jnp.where(residual(x, g) <= gtol, 3, status)
+        return origin + scales * x, f, nfcn, i, status, history
+
+    return jax.jit(solve)
+
+
+def _solver(objective, names, fixed_names, max_iter, report_every):
+    key = (id(objective), names, fixed_names, max_iter, report_every)
+    cached = _SOLVERS.get(key)
+    if cached is not None and cached[0]() is objective:
+        return cached[1]
+    try:
+        ref = weakref.ref(objective, lambda _: _SOLVERS.pop(key, None))
+    except TypeError:
+        return _build_solver(objective, names, fixed_names, max_iter, report_every)
+
+    def call(values):
+        return ref()(values)
+
+    solver = _build_solver(call, names, fixed_names, max_iter, report_every)
+    _SOLVERS[key] = (ref, solver)
+    return solver
+
+
+def minimize(
+    objective: Callable,
+    parameters: Sequence,
+    *,
+    start_values: Mapping[str, float] | None = None,
+    max_iter: int = 1000,
+    gtol: float = 1e-4,
+    verbose: int = 0,
+) -> NesterovResult:
+    """Run projected Nesterov with device-resident iterations and backtracking.
+
+    NumPy is used only for small input vectors and the returned host result.
+    Starts, scales, bounds and fixed values are runtime inputs to a solver
+    shared while the objective is alive. The full history is transferred once.
+    """
+    if max_iter < 1 or not np.isfinite(gtol) or gtol <= 0:
+        raise ValueError("max_iter must be positive and gtol must be positive")
+    supplied = {} if start_values is None else dict(start_values)
+    free = tuple(p for p in parameters if not p.fixed)
+    if not free:
+        raise ValueError("At least one free parameter is required")
+    fixed = {p.name: float(p.value) for p in parameters if p.fixed}
+    origin = np.asarray([supplied.get(p.name, p.value) for p in free], dtype=float)
+    scales = np.asarray(
+        [
+            p.step if p.step is not None else max(abs(float(origin[i])), 1.0)
+            for i, p in enumerate(free)
+        ],
+        dtype=float,
+    )
+    bounds = [p.bounds or (None, None) for p in free]
+    lower = np.asarray(
+        [
+            (-np.inf if b[0] is None else b[0] - origin[i]) / scales[i]
+            for i, b in enumerate(bounds)
+        ]
+    )
+    upper = np.asarray(
+        [
+            (np.inf if b[1] is None else b[1] - origin[i]) / scales[i]
+            for i, b in enumerate(bounds)
+        ]
+    )
+    report_every = 50 if verbose == 2 else 10 if verbose >= 3 else None
+    solver = _solver(
+        objective, tuple(p.name for p in free), tuple(fixed), max_iter, report_every
+    )
+    physical, f, nfcn, iterations, status_code, history_array = jax.device_get(
+        solver(
+            jnp.asarray(origin),
+            jnp.asarray(scales),
+            jnp.asarray(tuple(fixed.values())),
+            jnp.asarray(lower),
+            jnp.asarray(upper),
+            jnp.asarray(gtol),
+        )
+    )
+    status = ("max_iter", "line_search_failed", "stalled", "converged")[
+        int(status_code)
+    ]
+    history = tuple(
+        {"iteration": i, "nll": float(row[0]), "projected_gradient": float(row[1])}
+        for i, row in enumerate(history_array[: int(iterations) + 1])
+    )
     values = {p.name: float(physical[i]) for i, p in enumerate(free)}
     values.update(fixed)
-    return NesterovResult(values=values, fval=f, valid=status == "converged",
-                          status=status, converged=status == "converged",
-                          history=tuple(history), nfcn=evaluations,
-                          errors={p.name: float("nan") for p in parameters if not p.fixed})
+    return NesterovResult(
+        values=values,
+        fval=float(f),
+        valid=status == "converged",
+        status=status,
+        converged=status == "converged",
+        history=history,
+        nfcn=int(nfcn),
+        errors={p.name: float("nan") for p in free},
+    )

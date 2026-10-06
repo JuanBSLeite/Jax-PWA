@@ -3,6 +3,7 @@ from types import SimpleNamespace
 import matplotlib
 
 matplotlib.use("Agg")
+import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -295,14 +296,15 @@ def test_plot_projection_show_pulls_rejects_explicit_ax():
     plt.close("all")
 
 
-def test_fit_session_sweight_covariance_updates_result_errors_and_matrix():
+@pytest.mark.parametrize("covariance", ["sweight", "sumw2"])
+def test_fit_session_sumw2_excludes_fixed_constraint_from_variability(covariance):
     model = _model()
     constraint = GaussianConstraint(model.parameters[0], mean=1.0, sigma=0.2)
     session = FitSession(model, _data(), constraints=(constraint,))
     result = session.fit(
         {"NR.x": 0.8},
         weights=jnp.asarray([1.0, -0.25]),
-        covariance="sweight",
+        covariance=covariance,
         strategy=1,
         hesse=False,
         hessian="jax",
@@ -314,10 +316,52 @@ def test_fit_session_sweight_covariance_updates_result_errors_and_matrix():
     # the signed-weight Hessian as its search curvature.
     assert result.nhessian == 0
     assert float(result.values["NR.x"]) == pytest.approx(1.0, abs=1e-5)
-    assert float(result.covariance["NR.x", "NR.x"]) == pytest.approx(
-        0.2**2, rel=1e-6
+    # The normalized one-component event PDF is independent of its global
+    # coefficient. The fixed Gaussian penalty identifies the point and enters
+    # A, but it is not an event fluctuation and therefore does not enter H_w2.
+    assert float(result.covariance["NR.x", "NR.x"]) == pytest.approx(0.0, abs=1e-14)
+    assert float(result.errors["NR.x"]) == pytest.approx(0.0, abs=1e-7)
+
+
+def test_score_outer_masks_zero_weight_at_physical_pdf_zero():
+    class ZeroSupportSession(FitSession):
+        @property
+        def parameters(self):
+            return (Parameter("mu", 0.0, step=0.1),)
+
+        def _cached_signal_logpdf(self, data, parameters):
+            finite = -0.5 * (jnp.asarray(data["s12"]) - parameters["mu"]) ** 2
+            return finite.at[0].set(-jnp.inf)
+
+        def _weighted_objective(self, weights):
+            from jaxpwa.likelihood import WeightedUnbinnedNLL
+
+            return WeightedUnbinnedNLL(
+                self._cached_signal_logpdf, self.data.as_dict(), weights
+            )
+
+    data = PhaseSpaceSample(
+        s12=jnp.asarray([0.0, 1.0]),
+        s13=jnp.asarray([0.2, 0.2]),
+        s23=jnp.asarray([1.0, 1.0]),
+        weights=jnp.ones(2),
     )
-    assert float(result.errors["NR.x"]) == pytest.approx(0.2, rel=1e-6)
+    session = ZeroSupportSession(model=None, data=data)
+    objective = session._score_outer_objective(
+        jnp.asarray([0.0, 1.0]), {"mu": 0.0}
+    )
+    assert float(objective({"mu": 0.0})) == 0.0
+    assert float(jax.hessian(lambda mu: objective({"mu": mu}))(0.0)) == 1.0
+
+
+def test_corrected_covariance_rejects_indefinite_matrix():
+    from types import SimpleNamespace
+
+    from jaxpwa.workflow import _install_minuit_covariance
+
+    result = SimpleNamespace(parameters=("x", "y"))
+    with pytest.raises(ValueError, match="positive semidefinite"):
+        _install_minuit_covariance(result, ("x", "y"), [[1.0, 2.0], [2.0, 1.0]])
 
 
 def test_fit_session_sandwich_covariance_matches_weighted_mean_formula():
@@ -370,6 +414,64 @@ def test_fit_session_sandwich_covariance_matches_weighted_mean_formula():
     )
 
 
+@pytest.mark.parametrize("covariance", ["sandwich", "sumw2"])
+def test_weighted_covariance_with_constraint_matches_closed_form(covariance):
+    # NLL = sum_i w_i (x_i-mu)^2/2 + (mu-m0)^2/(2 s^2). The constraint enters
+    # the sensitivity A = W + 1/s^2 but never the event variability B.
+    mu = Parameter("mu", 0.0, step=0.1)
+    m0, sigma = 0.5, 0.7
+    constraint = GaussianConstraint(mu, mean=m0, sigma=sigma)
+
+    class ConstrainedGaussianLocationSession(FitSession):
+        @property
+        def parameters(self):
+            return (mu,)
+
+        def _cached_signal_logpdf(self, data, parameters):
+            return -0.5 * (jnp.asarray(data["s12"]) - parameters["mu"]) ** 2
+
+        def _weighted_nll(self, weights):
+            from jaxpwa.likelihood import WeightedUnbinnedNLL
+
+            return WeightedUnbinnedNLL(
+                self._cached_signal_logpdf, self.data.as_dict(), weights
+            )
+
+    x = np.array([0.0, 1.0, 2.0, 3.0])
+    w = np.array([1.0, 0.8, -0.2, 0.5])
+    data = PhaseSpaceSample(
+        s12=jnp.asarray(x),
+        s13=jnp.full(4, 0.2),
+        s23=jnp.ones(4),
+        weights=jnp.ones(4),
+    )
+    session = ConstrainedGaussianLocationSession(
+        model=None, data=data, constraints=(constraint,)
+    )
+    result = session.fit(
+        {"mu": 0.0},
+        weights=jnp.asarray(w),
+        covariance=covariance,
+        strategy=1,
+        hesse=False,
+        hessian="jax",
+        ncall=100,
+    )
+
+    sensitivity = w.sum() + 1.0 / sigma**2
+    expected_mu = (np.sum(w * x) + m0 / sigma**2) / sensitivity
+    if covariance == "sumw2":
+        variability = np.sum(w**2)
+    else:
+        variability = np.sum(w**2 * (x - expected_mu) ** 2)
+
+    assert result.valid
+    assert float(result.values["mu"]) == pytest.approx(expected_mu, abs=1e-7)
+    assert float(result.covariance["mu", "mu"]) == pytest.approx(
+        variability / sensitivity**2, rel=1e-6
+    )
+
+
 def test_fit_session_sweight_covariance_requires_weights():
     session = FitSession(_model(), _data())
     with pytest.raises(ValueError, match="requires event weights"):
@@ -394,6 +496,37 @@ def test_invalid_weighted_fit_skips_postfit_covariance(monkeypatch, covariance):
         result = session.fit(weights=jnp.asarray([1.0, -0.25]), covariance=covariance)
     assert result is failed
     assert not result.valid
+    assert result.covariance is None
+
+
+@pytest.mark.parametrize("covariance", ["sandwich", "sumw2"])
+def test_weighted_fit_returning_nesterov_endpoint_skips_postfit_covariance(
+    monkeypatch, covariance
+):
+    from jaxpwa.fit import Minimizer
+    from jaxpwa.fit.nesterov import NesterovResult
+
+    # nesterov-minuit falls back to the Nesterov endpoint when the Minuit
+    # continuation worsens the NLL. That endpoint has no Minuit parameter
+    # list or covariance, so the session must warn instead of crashing.
+    endpoint = NesterovResult(
+        values={"NR.x": 0.9}, fval=1.0, valid=True, status="converged",
+        converged=True, history=(), nfcn=1, errors={"NR.x": float("nan")},
+    )
+    monkeypatch.setattr(Minimizer, "fit", lambda *args, **kwargs: endpoint)
+
+    def forbidden_hessian(*args, **kwargs):
+        pytest.fail("A Nesterov endpoint must not evaluate postfit Hessians")
+
+    monkeypatch.setattr(Minimizer, "jax_hessian", forbidden_hessian)
+    session = FitSession(_model(), _data())
+    with pytest.warns(RuntimeWarning, match="Nesterov endpoint"):
+        result = session.fit(
+            weights=jnp.asarray([1.0, -0.25]),
+            covariance=covariance,
+            method="nesterov-minuit",
+        )
+    assert result is endpoint
     assert result.covariance is None
 
 

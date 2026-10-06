@@ -85,15 +85,15 @@ def generate_time_dependent_toy(
             "resolution and unit temporal acceptance"
         )
     proposal_size = (
-        max(20 * size, 20_000)
-        if proposal_size is None
-        else int(proposal_size)
+        max(20 * size, 20_000) if proposal_size is None else int(proposal_size)
     )
     if proposal_size < size:
         raise ValueError("proposal_size must be at least size")
 
     values = {} if parameters is None else parameters
     tau = float(session.mixing.resolved(values)[2])
+    if not np.isfinite(tau) or tau <= 0:
+        raise ValueError("mixing lifetime must be finite and positive")
     rng = np.random.default_rng(seed)
     true_tags = np.where(
         rng.random(proposal_size) < float(production_fraction), 1, -1
@@ -102,7 +102,11 @@ def generate_time_dependent_toy(
         rng.random(proposal_size) < wrong, -true_tags, true_tags
     ).astype(np.int32)
     times = _truncated_exponential_sample(
-        rng, proposal_size, session.time_range[0], session.time_range[1], 1.0 / tau
+        rng,
+        proposal_size,
+        session.time_range[0],
+        session.time_range[1],
+        1.0 / tau,
     )
     proposal_time = _truncated_exponential_density(
         times, session.time_range[0], session.time_range[1], 1.0 / tau
@@ -123,14 +127,9 @@ def generate_time_dependent_toy(
         ),
     )
     density = np.asarray(objective.densities(values), dtype=float)
-    observed_probability = np.where(
-        observed_tags == 1,
-        float(production_fraction) * (1.0 - wrong)
-        + (1.0 - float(production_fraction)) * wrong,
-        float(production_fraction) * wrong
-        + (1.0 - float(production_fraction)) * (1.0 - wrong),
-    )
-    weights = density * observed_probability / np.maximum(proposal_time, 1e-300)
+    # Tags were already drawn from the requested observed-tag probability.
+    # It cancels between target and proposal in the importance ratio.
+    weights = density / np.maximum(proposal_time, 1e-300)
     if not np.all(np.isfinite(weights) & (weights >= 0)) or not np.any(weights > 0):
         raise ValueError("time-dependent toy proposal produced invalid weights")
     probabilities = weights / weights.sum()

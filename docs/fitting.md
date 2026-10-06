@@ -34,12 +34,43 @@ bounds, backtracking, and restart after a failed extrapolation. It is a
 nonconvex heuristic here: the convex (O(1/k^2)) guarantee does not apply to
 the amplitude likelihood, and the result is not a global-minimum guarantee.
 
-The Minuit continuation is checked against the Nesterov endpoint. An invalid,
-non-finite, or higher-NLL continuation is rejected and the Nesterov result is
-returned. Within Minuit, the best finite stage is restored if a later MIGRAD
-stage worsens the NLL. This prevents an unstable continuation from becoming
+Iterations, projected-gradient checks and both backtracking attempts execute
+inside one JAX program. Only the final endpoint and history are transferred to
+the host. The compiled solver is reused while the objective remains alive;
+starting values, parameter scales, bounds and fixed values are runtime inputs.
+Changing `nesterov_max_iter` or the parameter-name layout creates a different
+program. In the local two-parameter Rosenbrock benchmark, repeated 530-evaluation
+runs fell from about 201 ms to 27 ms, while the first JIT call increased from
+about 281 ms to 418 ms. Large likelihoods can have a different balance between
+objective execution and dispatch overhead.
+
+The Nesterov stage stops with `status="stalled"` after five consecutive
+accepted iterations without any NLL decrease. This happens when backtracking
+has shrunk the step to floating-point resolution, typically near a point where
+the objective is unbounded below and its gradient diverges. The classic case
+is an event-weighted NLL with negative weights, where `-w_i log p_i` goes to
+`-inf` as the density at a negative-weight event goes to zero. A stalled
+endpoint is not a minimum, and a rising projected gradient in the progress
+output is the signature of this case.
+
+The Minuit continuation is checked against the Nesterov endpoint. A
+non-finite or higher-NLL continuation is rejected and the Nesterov result is
+returned. An invalid continuation (call limit reached, EDM above target, or a
+failed error matrix) that does not raise the NLL is returned with its invalid
+status, exactly as `method="minuit"` would return it: it is at least as good a
+point as the Nesterov endpoint, which has no EDM or covariance check of its
+own. Within Minuit, the best finite stage is restored if a later MIGRAD
+stage, including the final polishing pass, worsens the NLL or becomes
+non-finite. A retained Minuit result preserves its values, NLL, validity and
+covariance together; resetting values alone would leave stale `FMin` metadata.
+This prevents an unstable continuation from becoming
 the reported fit, but it does not turn a non-converged Nesterov endpoint into
 a valid statistical minimum; inspect `result.valid`, NLL, EDM, and covariance.
+
+In an event-weighted `FitSession.fit` or `CPFitSession.fit(weights=..., covariance="sandwich"|"sumw2")`,
+a returned Nesterov endpoint has no covariance to correct: the session warns
+and skips the corrected covariance, as it already does for an invalid Minuit
+result.
 
 ## NLL and Minuit convention
 
@@ -206,7 +237,10 @@ This should be used when introducing a new dynamical parameter or lineshape.
 
 ## sWeight / COW Dalitz fits
 
-`FitSession.fit()` accepts per-event signal weights directly:
+`FitSession.fit()` accepts per-event signal weights directly
+(`CPFitSession.fit(weights=(plus_weights, minus_weights), ...)` is the joint
+B+/B- equivalent with the same covariance options; see
+[cp_coefficients.md](cp_coefficients.md#event-weighted-sweightcow-cp-fits)):
 
 ```python
 result = session.fit(
@@ -300,6 +334,16 @@ Use `covariance="sumw2"` for this prescription. The historical
 for `"sumw2"`. The squared-weight Hessian expression is commonly used but is
 not generally identical to the Godambe covariance; equality requires an
 additional score/Hessian information-identity relation.
+
+Gaussian constraints are fixed penalties, not event fluctuations: they enter
+the sensitivity matrix `A` but neither `B` nor `H_w2`. For a weighted
+Gaussian location fit with a constraint of width `s`,
+`A = sum_i w_i + 1/s^2` and `C_sumw2 = sum_i w_i^2 / A^2`.
+
+A zero-weight event contributes exactly zero to the weighted objective, even
+at a physical PDF zero where `log p_i = -inf`. Gradients stay finite there
+only because Jax-PWA's signal log-densities use a safe logarithm; a custom
+`logpdf` passed to `WeightedUnbinnedNLL` must do the same.
 
 ### JAX Hessian behavior during minimization
 
@@ -426,7 +470,6 @@ With iminuit >= 2.32, automatic second derivatives can be selected explicitly:
 result = session.fit(
     strategy=1,
     hessian="jax",
-    hessian_batch_size=1,
     hesse=True,
     verbose=1,
 )
@@ -436,7 +479,6 @@ minimizer = Minimizer(
     nll,
     parameters,
     hessian="jax",
-    hessian_batch_size=1,
     verbose=1,
 )
 ```
@@ -446,9 +488,8 @@ Hessian during MIGRAD; Minuit still handles bounds, covariance inversion and the
 `errordef` scaling. The exception is `FitSession.fit(..., covariance="sweight")`,
 where `"jax"` is reserved for the postfit squared-weight covariance as described
 above. It requires an objective differentiable twice. For floating
-dynamics, `hessian_batch_size=1` evaluates Hessian-vector products sequentially
-and minimizes peak memory. Larger values evaluate several columns together and
-can improve throughput on GPUs with more VRAM. This supports QMI's custom VJPs
+dynamics, Hessian-vector products are evaluated sequentially, which minimizes
+peak memory. This supports QMI's custom VJPs
 without requiring the full event-by-parameter batch. This reduces repeated
 likelihood probes but does not guarantee a faster fit: second-order JIT
 compilation and retained intermediate arrays can be expensive. Compilation is

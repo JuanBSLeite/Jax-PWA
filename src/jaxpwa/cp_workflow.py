@@ -34,6 +34,7 @@ from jaxpwa.likelihood.cp import _signal_yield_pair
 from jaxpwa.observables.errors import _covariance_matrix
 from jaxpwa.plotting import _draw_pulls_1d, plot_binned_data
 from jaxpwa.sampling import weighted_resample
+from jaxpwa.workflow import _fit_with_optional_weights
 
 
 def _collect_parameters(value: object) -> tuple[Parameter, ...]:
@@ -138,6 +139,18 @@ class CPFitSession:
     extended: bool = False
     signal_yield: object | None = None
     constraints: tuple[object, ...] = ()
+    plus_event_weights: object | None = None
+    minus_event_weights: object | None = None
+
+    def __post_init__(self):
+        if self.event_weights is not None and (
+            self.backgrounds or self.extended or self.signal_fraction is not None
+            or self.signal_yield is not None
+        ):
+            raise ValueError(
+                "event weights require a signal-only CPFitSession without "
+                "background/fraction/yield configuration"
+            )
 
     @classmethod
     def from_root(cls, plus_model, minus_model, plus_file, plus_tree, minus_file, minus_tree, *, plus_root_kwargs=None, minus_root_kwargs=None, **session_kwargs):
@@ -161,6 +174,49 @@ class CPFitSession:
     def with_constraint(self, constraint):
         """Return a copy with an added constraint applied to the joint objective."""
         return replace(self, constraints=self.constraints + (constraint,))
+
+    def with_event_weights(self, plus_weights, minus_weights):
+        """Return a signal-only copy whose data carry per-event signal weights.
+
+        For sWeight/COW background subtraction: ``objective`` becomes the
+        weighted joint objective, ``fit()`` uses these weights unless others
+        are passed, and projections draw weighted data histograms
+        (``sqrt(sum w^2)`` errors) against a signal model scaled to the
+        weighted sums. Binned/unbinned goodness-of-fit tests are not defined
+        for weighted data and raise. See ``fit``.
+        """
+        return replace(self, plus_event_weights=plus_weights, minus_event_weights=minus_weights)
+
+    @cached_property
+    def event_weights(self):
+        """The ``(plus, minus)`` session event weights, or None if unweighted."""
+        if (self.plus_event_weights is None) != (self.minus_event_weights is None):
+            raise ValueError("plus_event_weights and minus_event_weights must be supplied together")
+        if self.plus_event_weights is None:
+            return None
+        return self._split_weights((self.plus_event_weights, self.minus_event_weights))
+
+    def _data_weights(self, charge):
+        """Per-event data weights of one charge (ones when unweighted)."""
+        weights = self.event_weights
+        sample = self.plus_data if charge == "plus" else self.minus_data
+        if weights is None:
+            return np.ones(sample.size)
+        return np.asarray(weights[0] if charge == "plus" else weights[1], dtype=float)
+
+    def _total_data_events(self):
+        """N_plus + N_minus, or the weighted sum for an event-weighted session."""
+        weights = self.event_weights
+        if weights is None:
+            return self.plus_data.size + self.minus_data.size
+        return float(jnp.sum(weights[0]) + jnp.sum(weights[1]))
+
+    def _require_unweighted(self, method):
+        if self.event_weights is not None:
+            raise NotImplementedError(
+                f"{method} assumes unweighted (Poisson) data and is not defined for an "
+                "event-weighted (sWeight/COW) CPFitSession"
+            )
 
     @cached_property
     def plus_acceptance_data(self):
@@ -219,11 +275,73 @@ class CPFitSession:
 
     @cached_property
     def base_objective(self):
+        if self.event_weights is not None:
+            return self._weighted_nll(self.event_weights)
         return CPJointNLL(self.plus_cache, self.minus_cache, plus_efficiency=self.plus_acceptance_data, minus_efficiency=self.minus_acceptance_data, background_categories=self.background_categories, signal_fraction=self.signal_fraction, extended=self.extended, signal_yield=self.signal_yield)
 
     @cached_property
     def objective(self):
         return ConstrainedNLL(self.base_objective, *self.constraints) if self.constraints else self.base_objective
+
+    def _split_weights(self, weights):
+        """Validate ``weights=(plus_weights, minus_weights)`` against the data."""
+        if not isinstance(weights, (tuple, list)) or len(weights) != 2:
+            raise TypeError("CP event weights must be a (plus_weights, minus_weights) pair")
+        plus_weights, minus_weights = (jnp.asarray(w) for w in weights)
+        for label, array, sample in (("plus", plus_weights, self.plus_data), ("minus", minus_weights, self.minus_data)):
+            if array.shape != (sample.size,):
+                raise ValueError(f"{label} weights must have shape ({sample.size},), got {array.shape}")
+            if jnp.iscomplexobj(array):
+                raise ValueError(f"{label} weights must be real")
+            if not bool(jnp.all(jnp.isfinite(array))):
+                raise ValueError(f"{label} weights must be finite")
+        return plus_weights, minus_weights
+
+    def _weighted_nll(self, weights):
+        """Signal-only weighted ``CPJointNLL`` (no constraints) for sWeight/COW CP fits."""
+        if self.backgrounds or self.extended or self.signal_fraction is not None or self.signal_yield is not None:
+            raise ValueError(
+                "event weights are incompatible with explicit background/fraction/"
+                "yield configuration; build a signal-only CPFitSession for an sWeight/COW fit"
+            )
+        plus_weights, minus_weights = self._split_weights(weights)
+        return CPJointNLL(
+            self.plus_cache, self.minus_cache,
+            plus_efficiency=self.plus_acceptance_data, minus_efficiency=self.minus_acceptance_data,
+            plus_weights=plus_weights, minus_weights=minus_weights,
+        )
+
+    def _weighted_objective(self, weights):
+        """Weighted joint NLL plus this session's constraints."""
+        nll = self._weighted_nll(weights)
+        return ConstrainedNLL(nll, *self.constraints) if self.constraints else nll
+
+    def _score_outer_objective(self, weights, reference_parameters):
+        """Scalar whose Hessian at the reference is ``sum_i w_i^2 s_i s_i^T`` over both charges.
+
+        Same construction as ``FitSession._score_outer_objective``: every
+        residual ``log p_i(theta) - log p_i(theta_hat)`` vanishes at
+        ``theta_hat``, so the Hessian of ``0.5 sum_i w_i^2 delta_i^2`` there is
+        exactly the weighted score outer product. Charges are summed, since
+        both share one jointly normalized density.
+        """
+        nll = self._weighted_nll(weights)
+        plus_weights, minus_weights = nll.plus_weights, nll.minus_weights
+        reference = tuple(
+            jax.lax.stop_gradient(values)
+            for values in nll.signal_log_densities(reference_parameters)
+        )
+        squared = (jnp.square(plus_weights), jnp.square(minus_weights))
+
+        def objective(parameters):
+            total = 0.0
+            for weight2, current, ref in zip(squared, nll.signal_log_densities(parameters), reference, strict=True):
+                active = weight2 != 0
+                delta = jnp.where(active, current - jnp.where(active, ref, 0.0), 0.0)
+                total = total + 0.5 * jnp.sum(weight2 * jnp.square(delta))
+            return total
+
+        return objective
 
     @property
     def parameters(self):
@@ -242,23 +360,37 @@ class CPFitSession:
 
     def minimizer(
         self, *, tolerance=1e-4, verbose=0, hessian="numerical",
-        hessian_batch_size=1,
     ):
         """Build a Minimizer over the joint objective and this session's parameters."""
         return Minimizer(
             self.objective, self.parameters,
             tolerance=tolerance, verbose=verbose, hessian=hessian,
-            hessian_batch_size=hessian_batch_size,
         )
 
     def fit(
-        self, start_values=None, *, simplex=False, ncall=None, strategy=2,
+        self, start_values=None, *, weights=None, covariance="minuit",
+        simplex=False, ncall=None, strategy=2,
         hesse=True, tolerance=1e-4, verbose=0, hessian="numerical",
-        hessian_batch_size=1,
         method="minuit", nesterov_max_iter=1000, nesterov_gtol=1e-4,
         update_model=False,
     ):
         """Fit the joint B+/B- likelihood.
+
+        Pass ``weights=(plus_weights, minus_weights)`` (e.g. sWeights/COWs,
+        one array per charge, aligned with ``plus_data``/``minus_data``) to
+        minimize the signal-only weighted joint objective
+        ``-sum_i w_i log S_q(phi_i)``, with the same joint charge
+        normalization as the unweighted fit (see ``CPJointNLL``).
+        ``covariance`` has the same meaning as in ``FitSession.fit``:
+        ``"sandwich"`` (recommended for signed weights) installs the Godambe
+        covariance ``H_w^-1 (sum_i w_i^2 s_i s_i^T) H_w^-1``, ``"sumw2"``
+        (alias ``"sweight"``) ``H_w^-1 H_w2 H_w^-1``, and ``"minuit"`` keeps
+        Minuit's uncorrected HESSE. Both corrections treat the weights as
+        fixed: they do not propagate the uncertainty of the fit that
+        determined them. Weighted fits must be signal-only: no background,
+        ``signal_fraction``, ``signal_yield`` or ``extended``. A session built
+        with ``with_event_weights`` uses its own weights when ``weights`` is
+        omitted.
 
         ``self.plus_model``/``self.minus_model`` are frozen and never mutated
         by this call. Pass ``update_model=True`` to also get a
@@ -269,15 +401,24 @@ class CPFitSession:
         value then becomes ``(result, plus_model, minus_model)`` instead of
         plain ``result``.
         """
-        result = self.minimizer(
-            tolerance=tolerance, verbose=verbose, hessian=hessian,
-            hessian_batch_size=hessian_batch_size,
-        ).fit(
+        result = _fit_with_optional_weights(
+            unweighted_minimizer=lambda: self.minimizer(
+                tolerance=tolerance, verbose=verbose, hessian=hessian,
+            ),
+            weighted_objective=self._weighted_objective,
+            event_weighted_objective=self._weighted_nll,
+            score_outer_objective=self._score_outer_objective,
+            parameters=self.parameters,
+            weights=self.event_weights if weights is None else tuple(weights),
+            covariance=covariance,
             start_values=start_values,
             simplex=simplex,
             ncall=ncall,
             strategy=strategy,
             hesse=hesse,
+            tolerance=tolerance,
+            verbose=verbose,
+            hessian=hessian,
             method=method,
             nesterov_max_iter=nesterov_max_iter,
             nesterov_gtol=nesterov_gtol,
@@ -292,12 +433,10 @@ class CPFitSession:
     def fit_multistart(
         self, n_starts=20, *, seed=None, include_default=False, simplex=False,
         strategy=1, tolerance=1e-4, verbose=0, hessian="numerical",
-        hessian_batch_size=1,
     ):
         """Fit the joint likelihood from multiple random starts, keep the best fit."""
         return self.minimizer(
             tolerance=tolerance, verbose=verbose, hessian=hessian,
-            hessian_batch_size=hessian_batch_size,
         ).fit_multistart(
             n_starts=n_starts,
             seed=seed,
@@ -448,6 +587,67 @@ class CPFitSession:
         )
         return {"plus": plus, "minus": minus}
 
+    def component_cp_asymmetries(self, result, *, acceptance_weighted=False):
+        """Integrated CP asymmetry of each amplitude component, with delta-method errors.
+
+        ``A_CP(k) = (I_k^- - I_k^+) / (I_k^- + I_k^+)`` with
+        ``I_k^q = integral |c_k^q A_k^q|^2 dPhi`` (``component_intensities``),
+        i.e. the per-charge numerators of the fit fractions on the common
+        integration scale both charges share. Unlike the coefficient-level
+        ``A_CP`` of ``CPRealImag``, this includes CP violation carried by the
+        component's dynamics, e.g. the per-node ``dx``/``dy`` of a QMI S-wave
+        whose global coefficient is fixed. Physical (efficiency excluded) by
+        default; ``acceptance_weighted=True`` weights both integrals by each
+        charge's efficiency. Errors propagate the joint postfit covariance
+        through both charges in one Jacobian (NaN without a covariance).
+
+        Returns ``{name: {"value", "error", "intensity_plus", "intensity_minus"}}``.
+        """
+        values = self.result_values(result)
+        plus_cache = self.plus_model._fraction_cache(None, self.plus_efficiency if acceptance_weighted else None)
+        minus_cache = self.minus_model._fraction_cache(None, self.minus_efficiency if acceptance_weighted else None)
+        names = [component.name for component in plus_cache.components]
+        if names != [component.name for component in minus_cache.components]:
+            raise ValueError("plus_model and minus_model must declare the same components in the same order")
+
+        plus = np.asarray(plus_cache.component_intensities(values), dtype=float)
+        minus = np.asarray(minus_cache.component_intensities(values), dtype=float)
+        total = plus + minus
+        with np.errstate(divide="ignore", invalid="ignore"):
+            asymmetry = np.where(total > 0, (minus - plus) / total, np.nan)
+
+        errors = np.full(len(names), np.nan)
+        if getattr(result, "covariance", None) is not None:
+            parameter_names = sorted({
+                parameter.name
+                for parameter in (*self.plus_model.parameters, *self.minus_model.parameters)
+                if not parameter.fixed
+            })
+            if not parameter_names:
+                errors = np.where(total > 0, 0.0, np.nan)
+            else:
+                plus_jacobian = np.asarray(self.plus_model._fraction_jacobian(
+                    plus_cache, values, parameter_names, "component_intensities"))
+                minus_jacobian = np.asarray(self.minus_model._fraction_jacobian(
+                    minus_cache, values, parameter_names, "component_intensities"))
+                with np.errstate(divide="ignore", invalid="ignore"):
+                    d_minus = np.where(total > 0, 2.0 * plus / total**2, 0.0)
+                    d_plus = np.where(total > 0, -2.0 * minus / total**2, 0.0)
+                jacobian = d_minus[:, None] * minus_jacobian + d_plus[:, None] * plus_jacobian
+                covariance = np.asarray(_covariance_matrix(result.covariance, parameter_names))
+                variance = np.einsum("kp,pq,kq->k", jacobian, covariance, jacobian)
+                errors = np.where(total > 0, np.sqrt(np.clip(variance, 0.0, None)), np.nan)
+
+        return {
+            name: {
+                "value": float(asymmetry[index]),
+                "error": float(errors[index]),
+                "intensity_plus": float(plus[index]),
+                "intensity_minus": float(minus[index]),
+            }
+            for index, name in enumerate(names)
+        }
+
     def report(self, result, *, include_fit_fractions=True, acceptance_weighted_fractions=False, include_correlation=True):
         """Assemble a dict summary of the fit.
 
@@ -468,7 +668,7 @@ class CPFitSession:
     def _projection_components_pair(self, values, plus_sample, minus_sample):
         from jaxpwa.workflow import _scaled_projection_weights
 
-        total_events = self.plus_data.size + self.minus_data.size
+        total_events = self._total_data_events()
         standalone = False
         if self.extended:
             plus_yield, minus_yield, standalone = _signal_yield_pair(self.signal_yield, values)
@@ -539,6 +739,8 @@ class CPFitSession:
         show_components=True, show_pulls=False, log_scale=False,
         projection_size=250_000, projection_seed=20260901, folded=False,
         partner_variable=None, fold_side="low", selection=None, axes=None,
+        show_amplitude_components=False, legend_panel=False, extra_panel=False,
+        share_y=False, show_interference=True,
     ):
         """Plot smooth B+/B- projections without histogramming quadrature nodes.
 
@@ -565,6 +767,26 @@ class CPFitSession:
         its own 2x2 figure and therefore requires ``axes=None``; the return
         value is then the full 2x2 axes grid (row 0 the histograms, row 1 the
         pulls) instead of the usual length-2 list.
+
+        ``show_amplitude_components=True`` also draws each amplitude
+        component of the signal model separately: the incoherent
+        contribution ``|c_k A_k|^2`` of component ``k`` (per rendering event,
+        the signal weight times ``|c_k A_k|^2 / |sum_j c_j A_j|^2``), on the
+        same scale as the signal. These do not add up to the signal; on a
+        linear y axis the remainder is drawn as ``interference`` unless
+        ``show_interference=False``.
+
+        ``legend_panel=True`` (requires ``axes=None``) moves the legend out of
+        the histograms into a separate column on the right of the figure,
+        shared by both charges (the data entry is labelled ``data``).
+        ``extra_panel=True`` additionally splits that column into the legend
+        (top) and an empty panel (bottom) for the caller, e.g. a Dalitz-plot
+        map of the projected region. They are available as
+        ``figure.legend_axes`` and ``figure.extra_axes``
+        (``axes[0].figure``); the return value is unchanged.
+
+        ``share_y=True`` gives the B+ and B- histograms (and pull panels) one
+        common y axis, with its label and tick labels only on the left panel.
         """
         return self._plot_projection(
             result, variable, bins=bins, range=range,
@@ -573,6 +795,9 @@ class CPFitSession:
             projection_seed=projection_seed, folded=folded,
             partner_variable=partner_variable, fold_side=fold_side,
             selection=selection, axes=axes,
+            show_amplitude_components=show_amplitude_components,
+            legend_panel=legend_panel, extra_panel=extra_panel, share_y=share_y,
+            show_interference=show_interference,
         )
 
     def prepare_projection_toy(
@@ -605,7 +830,9 @@ class CPFitSession:
         projection_size=250_000, projection_seed=20260901, folded=False,
         partner_variable=None, fold_side="low", selection=None, axes=None,
         method="inverse-transform", projection_toy=None,
-        include_toy_uncertainty=True, **toy_options,
+        include_toy_uncertainty=True, show_amplitude_components=False,
+        legend_panel=False, extra_panel=False, share_y=False, show_interference=True,
+        **toy_options,
     ):
         """Plot generated model toys with the same options as ``plot_projection``.
 
@@ -621,6 +848,10 @@ class CPFitSession:
         not include fit-parameter uncertainty. False gives the original pull
         convention. Regional selections never renormalize the toy yields.
         The axes/2x2 pull-grid return convention is unchanged.
+        ``show_amplitude_components`` is as in ``plot_projection``: the toy
+        signal events are reweighted by ``|c_k A_k|^2 / |sum_j c_j A_j|^2``.
+        ``legend_panel``/``extra_panel``/``share_y``/``show_interference`` are as
+        in ``plot_projection``.
         """
         return self._plot_projection(
             result, variable, bins=bins, range=range,
@@ -632,6 +863,9 @@ class CPFitSession:
             projection_toy=projection_toy, method=method,
             include_toy_uncertainty=include_toy_uncertainty,
             toy_options=toy_options,
+            show_amplitude_components=show_amplitude_components,
+            legend_panel=legend_panel, extra_panel=extra_panel, share_y=share_y,
+            show_interference=show_interference,
         )
 
     def _plot_projection(
@@ -641,6 +875,8 @@ class CPFitSession:
         partner_variable=None, fold_side="low", selection=None, axes=None,
         use_toy=False, projection_toy=None, method="inverse-transform",
         include_toy_uncertainty=False, toy_options=None,
+        show_amplitude_components=False, legend_panel=False, extra_panel=False,
+        share_y=False, show_interference=True,
     ):
         import matplotlib.pyplot as plt
         if folded and partner_variable is None:
@@ -651,6 +887,12 @@ class CPFitSession:
             raise ValueError(
                 "show_pulls=True builds its own figure layout; pass axes=None"
             )
+        if (legend_panel or extra_panel) and axes is not None:
+            raise ValueError(
+                "legend_panel/extra_panel build their own figure layout; pass axes=None"
+            )
+        if extra_panel:
+            legend_panel = True
         fold_fn = np.minimum if fold_side == "low" else np.maximum
         selection_masks = {}
 
@@ -692,6 +934,13 @@ class CPFitSession:
                     projection_seed=projection_seed, method=method,
                     **(toy_options or {}),
                 )
+            elif toy_options:
+                # Generation options cannot apply to an existing toy; refuse
+                # them rather than silently dropping a mistyped keyword.
+                raise TypeError(
+                    f"toy options {sorted(toy_options)} are ignored with projection_toy; "
+                    "pass them to prepare_projection_toy instead"
+                )
             projection_toy._check(self, values)
             plus_components = projection_toy.plus_components
             minus_components = projection_toy.minus_components
@@ -713,39 +962,93 @@ class CPFitSession:
             # (`plt.style.use(...)`, e.g. mplhep), scaled by panel count
             # rather than a hardcoded absolute figsize.
             base_w, base_h = plt.rcParams["figure.figsize"]
-            if show_pulls:
-                _, grid = plt.subplots(
-                    2, 2, figsize=(base_w * 2, base_h * 1.2), sharex="col",
-                    gridspec_kw={"height_ratios": (3, 1)},
+            if not legend_panel:
+                if show_pulls:
+                    _, grid = plt.subplots(
+                        2, 2, figsize=(base_w * 2, base_h * 1.2), sharex="col",
+                        gridspec_kw={"height_ratios": (3, 1)},
+                        constrained_layout=True,
+                    )
+                    axes, pulls_axes = grid[0], grid[1]
+                else:
+                    _, axes = plt.subplots(
+                        1, 2, figsize=(base_w * 2, base_h), constrained_layout=True
+                    )
+            else:
+                # Same charge panels plus a right-hand column for the legend
+                # (and optionally an extra panel below it).
+                side_ratio = 0.6
+                rows = 2 if show_pulls else 1
+                figure = plt.figure(
+                    figsize=(base_w * (2 + side_ratio), base_h * (1.2 if show_pulls else 1.0)),
                     constrained_layout=True,
                 )
-                axes, pulls_axes = grid[0], grid[1]
-            else:
-                _, axes = plt.subplots(
-                    1, 2, figsize=(base_w * 2, base_h), constrained_layout=True
+                spec = figure.add_gridspec(
+                    rows, 3, width_ratios=(1, 1, side_ratio),
+                    height_ratios=(3, 1) if show_pulls else None,
                 )
+                top = [figure.add_subplot(spec[0, col]) for col in (0, 1)]
+                if show_pulls:
+                    bottom = [figure.add_subplot(spec[1, col], sharex=top[col]) for col in (0, 1)]
+                    grid = np.empty((2, 2), dtype=object)
+                    grid[0, :], grid[1, :] = top, bottom
+                    axes, pulls_axes = grid[0], grid[1]
+                else:
+                    axes = np.asarray(top, dtype=object)
+                if extra_panel:
+                    side = spec[:, 2].subgridspec(2, 1, height_ratios=(1, 1.2))
+                    figure.legend_axes = figure.add_subplot(side[0])
+                    figure.extra_axes = figure.add_subplot(side[1])
+                else:
+                    figure.legend_axes = figure.add_subplot(spec[:, 2])
+                    figure.extra_axes = None
+                figure.legend_axes.axis("off")
         label = (
             rf"$s_{{\mathrm{{{fold_side}}}}}$" if folded else rf"${variable}$"
         )
+        log_bottoms = []
+        if share_y:
+            axes[1].sharey(axes[0])
+            if pulls_axes[0] is not None:
+                pulls_axes[1].sharey(pulls_axes[0])
         for ax, ax_pulls, charge, data, components in zip(
             axes, pulls_axes, ("plus", "minus"),
             (self.plus_data, self.minus_data), (plus_components, minus_components),
         ):
             dv = _folded_values(data)[_selection_mask(data)]
+            data_weights = (
+                None if self.event_weights is None
+                else self._data_weights(charge)[_selection_mask(data)]
+            )
             unit = r"GeV$^2$" if variable in ("s12","s13","s23") else ""
-            _, observed, _, _ = plot_binned_data(
-                dv, bins=edges, ax=ax,
-                label=f"B{'+' if charge=='plus' else '-'} data",
+            _, observed, observed_error, _ = plot_binned_data(
+                dv, bins=edges, ax=ax, weights=data_weights,
+                label=f"B{'+' if charge=='plus' else '-'} data"
+                + ("" if data_weights is None else " (weighted)"),
                 unit=unit, log_scale=log_scale,
             )
             total = np.zeros(len(edges) - 1)
             mc_variance = np.zeros_like(total)
+            model = self.plus_model if charge == "plus" else self.minus_model
             for name, sample, weights in components:
                 mask = _selection_mask(sample)
                 cv = _folded_values(sample)[mask]
                 counts, _ = np.histogram(
                     cv, bins=edges, weights=np.asarray(weights)[mask]
                 )
+                if show_amplitude_components and name == "signal":
+                    integration_weights = None
+                    if not use_toy:
+                        efficiency = (self.plus_efficiency if charge == "plus"
+                                      else self.minus_efficiency)
+                        veto = self.plus_veto if charge == "plus" else self.minus_veto
+                        integration_weights = np.asarray(sample.weights) * np.asarray(
+                            _acceptance(efficiency, veto, sample.as_dict())
+                        )
+                    self._draw_amplitude_components(
+                        ax, model, values, sample, np.asarray(weights), mask, cv, edges, counts, log_scale,
+                        show_interference, integration_weights=integration_weights,
+                    )
                 total += counts
                 if use_toy and include_toy_uncertainty:
                     mc_variance += np.histogram(
@@ -756,30 +1059,89 @@ class CPFitSession:
             ax.stairs(total, edges, label="total fit", linewidth=2.0)
             if use_toy and include_toy_uncertainty:
                 error = np.sqrt(mc_variance)
-                lower = np.maximum(
-                    total - error, np.finfo(float).tiny if log_scale else 0.0,
-                )
+                if log_scale:
+                    # Non-positive lower edges (e.g. bins emptied by a veto)
+                    # are left out instead of clipped to a tiny positive
+                    # number, which would stretch the log axis to ~1e-308.
+                    lower = np.where(total - error > 0, total - error, np.nan)
+                else:
+                    lower = np.maximum(total - error, 0.0)
                 ax.fill_between(
                     edges, np.r_[lower, lower[-1]],
                     np.r_[total + error, (total + error)[-1]],
                     step="post", alpha=0.2, color="grey", label="toy MC uncertainty",
                 )
+            if log_scale:
+                # Bottom from the smallest positive model/data bin, so empty
+                # (vetoed) bins and negative weighted bins do not set the scale.
+                positive = np.concatenate([total[total > 0], np.asarray(observed)[np.asarray(observed) > 0]])
+                if positive.size:
+                    ax.set_ylim(bottom=0.5 * float(np.min(positive)))
+                    log_bottoms.append(0.5 * float(np.min(positive)))
             axis_label = label + (" [GeV$^2$]" if unit else "")
-            ax.legend()
+            if legend_panel:
+                pass  # one shared legend in figure.legend_axes, drawn below
+            elif show_amplitude_components:
+                ax.legend(fontsize=7, ncol=2)
+            else:
+                ax.legend()
             if ax_pulls is None:
                 ax.set_xlabel(axis_label)
                 continue
-            occupied = total > 0
+            # Unweighted data: Poisson variance from the expectation. Weighted
+            # (sWeight/COW) data: the observed sum w^2 per bin instead.
+            data_variance = total if data_weights is None else np.square(observed_error)
+            occupied = (total > 0) & (data_variance + mc_variance > 0)
             pulls = np.full(total.shape, np.nan)
             pulls[occupied] = (
                 (observed[occupied] - total[occupied])
-                / np.sqrt(total[occupied] + mc_variance[occupied])
+                / np.sqrt(data_variance[occupied] + mc_variance[occupied])
             )
             _draw_pulls_1d(ax_pulls, edges, pulls)
-            if use_toy and include_toy_uncertainty:
+            if data_weights is not None:
+                ax_pulls.set_ylabel(r"pull $(o-e)/\sqrt{\sum w^2+\sigma^2_{MC}}$")
+            elif use_toy and include_toy_uncertainty:
                 ax_pulls.set_ylabel(r"pull $(o-e)/\sqrt{e+\sigma^2_{MC}}$")
             ax_pulls.set_xlabel(axis_label)
+        if share_y:
+            # One y axis for both charges: common limits, label on the left only.
+            if log_bottoms:
+                axes[0].set_ylim(bottom=min(log_bottoms))
+            for right in (axes[1], pulls_axes[1]):
+                if right is not None:
+                    right.set_ylabel("")
+                    right.tick_params(labelleft=False)
+        if legend_panel and axes is not None:
+            handles, labels = axes[0].get_legend_handles_labels()
+            labels = [text.replace("B+ data", "data", 1) for text in labels]
+            axes[0].figure.legend_axes.legend(handles, labels, loc="upper left", frameon=False, fontsize=9)
         return grid if show_pulls else axes
+
+    @staticmethod
+    def _draw_amplitude_components(ax, model, values, sample, weights, mask, folded_values, edges, signal_counts, log_scale,
+                                   show_interference=True, *, integration_weights=None):
+        """Draw |c_k A_k|^2 of every signal component (and, linear y, the interference)."""
+        data = sample.as_dict()
+        amplitudes = {name: np.asarray(value) for name, value in model.component_amplitudes(data, values).items()}
+        coherent = np.abs(sum(amplitudes.values())) ** 2
+        if integration_weights is None:
+            scale = np.divide(weights, coherent, out=np.zeros_like(weights, dtype=float), where=coherent > 0)
+        else:
+            # Phase-space projections know their integration measure. Keep
+            # individual contributions even where destructive interference
+            # makes the coherent signal exactly zero (0/0 loses them).
+            integral = float(np.sum(integration_weights * coherent))
+            scale = (np.sum(weights) / integral * integration_weights
+                     if integral > 0 else np.zeros_like(weights, dtype=float))
+        incoherent_sum = np.zeros(len(edges) - 1)
+        for name, amplitude in amplitudes.items():
+            component_weights = (scale * np.abs(amplitude) ** 2)[mask]
+            counts, _ = np.histogram(folded_values, bins=edges, weights=component_weights)
+            incoherent_sum += counts
+            ax.stairs(counts, edges, label=name, linewidth=1.0)
+        if show_interference and not log_scale:
+            ax.stairs(signal_counts - incoherent_sum, edges, label="interference",
+                      linewidth=1.0, linestyle="-.", color="magenta")
 
     def _projection_signal_density(self, sample, values, charge):
         """Normalized per-charge signal density at arbitrary points.
@@ -908,9 +1270,10 @@ class CPFitSession:
         :class:`~jaxpwa.goodness_of_fit.BinnedChi2Result` by
         default, or a single result when ``charge`` is given. Uses the same
         reweighted-MC-projection histogram as ``plot_projection`` for the
-        expected counts.
+        expected counts. For an event-weighted (sWeight/COW) session the data
+        histogram is the per-bin sum of weights and each bin's variance is its
+        sum of squared weights (``chi2_from_histograms(observed_variance=)``).
         """
-
         if folded and partner_variable is None:
             raise ValueError("folded=True requires partner_variable")
         if fold_side not in ("low", "high"):
@@ -953,7 +1316,12 @@ class CPFitSession:
             ("plus", self.plus_data, plus_components),
             ("minus", self.minus_data, minus_components),
         ):
-            observed, _ = np.histogram(_folded_values(data), bins=edges)
+            data_weights = None if self.event_weights is None else self._data_weights(name)
+            observed, _ = np.histogram(_folded_values(data), bins=edges, weights=data_weights)
+            variance = (
+                None if data_weights is None
+                else np.histogram(_folded_values(data), bins=edges, weights=data_weights**2)[0]
+            )
             expected = np.zeros(len(edges) - 1, dtype=float)
             for _, component_sample, weights in components:
                 component_values = _folded_values(component_sample)
@@ -962,7 +1330,8 @@ class CPFitSession:
                 )
                 expected += counts
             results[name] = chi2_from_histograms(
-                observed, expected, n_free_parameters=n_free_parameters, edges=(edges,)
+                observed, expected, n_free_parameters=n_free_parameters, edges=(edges,),
+                observed_variance=variance,
             )
         return results[charge] if charge is not None else results
 
@@ -990,9 +1359,10 @@ class CPFitSession:
         :class:`~jaxpwa.goodness_of_fit.BinnedChi2Result` by
         default, or a single result when ``charge`` is given. See
         ``FitSession.goodness_of_fit_chi2`` for the ``square_dalitz``/
-        ``folded`` conventions.
+        ``folded`` conventions. Event-weighted sessions use the per-bin sum of
+        weights with a sum-of-squared-weights variance, as in
+        ``goodness_of_fit_projection``.
         """
-
         if square_dalitz and (mother_mass is None or masses is None):
             raise ValueError("square_dalitz=True requires mother_mass and masses")
         if charge is not None and charge not in ("plus", "minus"):
@@ -1057,8 +1427,13 @@ class CPFitSession:
             ("minus", self.minus_data, minus_components),
         ):
             data_x, data_y = _coordinates(data)
+            data_weights = None if self.event_weights is None else self._data_weights(name)
             observed, x_edges, y_edges = np.histogram2d(
-                data_x, data_y, bins=bins, range=hist_range
+                data_x, data_y, bins=bins, range=hist_range, weights=data_weights
+            )
+            variance = (
+                None if data_weights is None
+                else np.histogram2d(data_x, data_y, bins=[x_edges, y_edges], weights=data_weights**2)[0]
             )
             expected = np.zeros_like(observed)
             for _, component_sample, weights in components:
@@ -1075,6 +1450,7 @@ class CPFitSession:
                 expected,
                 n_free_parameters=n_free_parameters,
                 edges=(x_edges, y_edges),
+                observed_variance=variance,
             )
         return results[charge] if charge is not None else results
 
@@ -1101,6 +1477,7 @@ class CPFitSession:
         offered here. See ``FitSession.point_to_point_dissimilarity``.
         """
 
+        self._require_unweighted("point_to_point_dissimilarity")
         if charge not in ("plus", "minus"):
             raise ValueError("charge must be 'plus' or 'minus'")
         values = self.result_values(result)

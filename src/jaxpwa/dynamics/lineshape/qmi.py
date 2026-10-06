@@ -922,21 +922,6 @@ class QMI:
 
         return True
 
-    @property
-    def prepared_mass_is_order_dependent(self) -> bool:
-        """Prepared QMI data encodes a block-wide event order, not per-event state.
-
-        ``prepare_mass`` returns ``order``/``starts``/``ends`` computed by sorting
-        every event in the block by interpolation interval (see ``prepare_mass``
-        below); these indices are only valid against that exact block. A caller
-        that reshapes/re-slices a prepared normalization chunk into smaller
-        pieces after the fact (e.g. for finer-grained AD memory bounding) must
-        check this flag first and skip QMI components, since a naive reshape
-        desyncs ``order``/``starts``/``ends`` from the smaller sub-blocks.
-        """
-
-        return True
-
     def prepare_mass(self, mass, context: ResonanceContext):
         """Cache the fixed knot interval and interpolation fraction."""
 

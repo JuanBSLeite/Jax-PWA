@@ -2,6 +2,51 @@
 
 Jax-PWA separates expensive one-time preparation from repeated likelihood evaluation. This distinction is especially important on GPUs, where recomputing resonance dynamics on a large normalization grid can dominate the fit even when the final coefficient algebra is small.
 
+## Reusing quadrature rules
+
+Gauss-Legendre users share a bounded host cache of the one-dimensional NumPy
+nodes and weights on `[-1, 1]`, keyed by order (up to 32 rules). This avoids
+repeating the same root calculation across adaptive mass segments, axes,
+models, discriminant PDFs and convolution setup. Cached arrays are read-only;
+interval scaling creates fresh arrays. Full grids and device buffers are not
+retained by this cache, and neither the nodes nor the integration measure changes.
+
+Run `benchmarks/benchmark_quadrature_preparation.py` with and without
+`--uncached` in fresh processes to compare first-use and repeated construction.
+The 2026-10-06 local GPU check reduced repeated construction of a million-point
+Square-Dalitz grid from about 117 ms to 15 ms, and of a 1,480,776-point adaptive
+mass grid from 585 ms to 107 ms. These are preparation timings, not faster
+likelihood evaluations; see [the review](reviews/20261006_package_audit.md)
+for scope and validation.
+
+## Avoiding repeated compilation
+
+Compact preparation and later data-only preparation on the same `DecayModel`
+share one data-side JIT function, including across efficiency-specific
+normalization wrappers. In the local five-component, 100,000-event benchmark,
+this reduced second-dataset preparation from 3.20 s to 28 ms by eliminating a
+duplicate compilation. Reuse the model and compatible array shapes/dtypes to
+benefit; the first preparation still compiles.
+
+For reuse across Python processes, JAX also supports an optional persistent
+compilation cache. Set `JAX_COMPILATION_CACHE_DIR` to a private directory before
+running the script, or configure `jax_compilation_cache_dir` before the first
+compilation. In two fresh local processes, the normalization/data compilation
+stages went from 2.68/2.37 s with an empty cache to 28/31 ms with a populated
+cache. Tracing, grid construction and execution remain separate costs.
+
+See the [NumPy and compilation review](reviews/20261006_numpy_compilation.md)
+for the full inventory, reproducible benchmarks, configuration example and
+remaining candidates. Persistent caching is optional and is not enabled
+globally by importing Jax-PWA.
+
+The optional Nesterov prefit also keeps its complete iteration and backtracking
+loop on device. Repeated runs of the same live objective reuse the solver while
+starts, scales, bounds and fixed values remain runtime inputs. A small local
+Rosenbrock benchmark improved from about 201 ms to 27 ms after compilation;
+the cold call became slower, so this mainly benefits repeated or expensive
+prefits. See [fitting](fitting.md) for convergence semantics.
+
 ## Prepared single-sample fits
 
 `FitSession` prepares a `PreparedAmplitudeCache` before repeated likelihood calls. For fixed resonance dynamics, the cache stores the component values on the data and the normalization matrix
@@ -25,7 +70,7 @@ Efficiency and veto values on the data and normalization sample are also evaluat
 
 If no dynamical parameter is floating, `PreparedAmplitudeCache` uses a dedicated compact preparation path. Fixed component evaluations, component normalization and construction of the normalization matrix are compiled with JAX, while the large normalization sample is processed in fixed-size chunks.
 
-The default normalization chunk size is 100,000 points. For a one-million-point Square-Dalitz grid, ten chunks therefore reuse the same XLA executable instead of compiling one very large graph specialized to one million points.
+For these fits the chunk size is 100,000 points (`normalization_chunk_size="auto"` resolves to it; an integer overrides it). Their chunks only amortize XLA compilation: for a one-million-point Square-Dalitz grid, ten chunks reuse the same XLA executable instead of compiling one very large graph specialized to one million points. There is no automatic differentiation through the grid here, so memory is not the constraint.
 
 The matrix is accumulated as sums over chunks,
 
@@ -93,21 +138,13 @@ Global component scales are applied after summing all chunks, with the
 original `mean(weights * f)` convention and sample-size denominator.
 
 Fewer pair integrals do not guarantee a shorter fit: dense matrix products
-can be very efficient on the target device. Compare the dynamic mass/width
-benchmark with `--normalization-kernel hermitian` and
-`--normalization-kernel dense-reference`:
+can be very efficient on the target device. A benchmark that replaced only the
+dynamic matrix reduction by a dense reference, before JAX compilation, without
+changing sample points, weights, free parameters or component-normalization
+conventions, gave the following (measured with the former chunking-sweep
+benchmark, which was removed together with the chunking options).
 
-```bash
-python benchmarks/benchmark_dynamics_chunking_sweep.py --events 100000 \
-  --normalization-resolution 500 --repeats 20 --chunk-sizes 100000 \
-  --microbatch-sizes 20000 --normalization-kernel hermitian
-```
-
-The reference option replaces only the dynamic matrix reduction in the
-benchmark process, before JAX compilation. It does not change sample points,
-weights, free parameters, or component-normalization conventions.
-
-On the local CPU on 2026-10-01, the above configuration with 40 repetitions
+On the local CPU on 2026-10-01, with 40 repetitions
 used 412,000 adaptive Square-Dalitz points and two floating resonance
 components. The dense reference averaged 36.35 ms per NLL/gradient evaluation;
 the Hermitian reduction averaged 38.54 ms (about 6% slower). First-use
@@ -117,42 +154,15 @@ within floating-point rounding, and retained 67,232,256 cache bytes.
 This checks evaluation cost and equivalence at phase-space starting points,
 not fit convergence or a GPU speedup.
 
-For floating dynamics, `normalization_chunk_size` also bounds the prepared
-normalization blocks. The requested size is a maximum: the cache balances the
-effective static width below it to minimize tail padding. Each block is
-accumulated with `jax.lax.scan` and checkpointed so gradients do not retain the
-whole grid. Ordinary parametric lineshapes use the additional
-`dynamics_microbatch_size` bound (default 20,000), which is balanced in the
-same way inside each macroblock.
-QMI is prepared directly in blocks no larger than that bound because its cached
-sort indices cannot be sliced after preparation. The grid resolution still
-controls quadrature accuracy and should not be reduced without a normalization-
-convergence check.
-
-### `normalization_chunk_size` is silently capped by `dynamics_microbatch_size` whenever an order-dependent lineshape floats
-
-The two chunk-size options are not always independent. `PreparedAmplitudeCache.prepare` (`amplitude/cache.py`,
-around `order_dependent_preparation`) checks whether *any* currently floating dynamic component has
-a lineshape with `prepared_mass_is_order_dependent = True` — today only `QMI`. If so, the macro
-chunk limit passed to `_prepare_chunked_dynamics` is `min(normalization_chunk_size,
-dynamics_microbatch_size)`, **not** `normalization_chunk_size` alone, because QMI's cached sort
-order and interval boundaries are only valid for the exact block they were prepared on, so its
-macro block and its AD microbatch must be the same size. This shrinks the macro chunk for
-**every** floating component sharing that partition, not just QMI, since all floating components in
-one model are chunked together.
-
-Concretely: a `DecayModel(normalization_chunk_size=100_000, dynamics_microbatch_size=20_000)`
-(both defaults except the first) with a floating QMI component reports
-`cache.effective_normalization_chunk_size == 19_600`, not `100_000` — confirmed by preparing the
-`benchmarks/benchmark_qmi_memory_speed.py` model (QMI plus GounarisSakurai `rho770`/`omega782`, QMI
-floating) and reading `cache.effective_normalization_chunk_size` /
-`cache.effective_dynamics_microbatch_size` after `prepare()`. Raising `normalization_chunk_size`
-alone therefore does nothing for macro-chunk granularity — and so nothing for the outer
-`jax.lax.scan` iteration count over `normalization_chunks` in `_chunked_dynamic_normalization` — in
-any fit where QMI (or a future order-dependent lineshape) is floating; `dynamics_microbatch_size`
-is the knob that actually controls it in that case. This is not a bug — it is what QMI's
-block-local sort state requires — but it is easy to miss while tuning a QMI fit's memory/throughput,
-since the two options read as independent everywhere else in this document.
+For floating dynamics, `normalization_chunk_size` also sets the size of the
+prepared normalization blocks. Each block is accumulated with `jax.lax.scan` and
+checkpointed, so gradients and Hessian-vector products retain the forward
+residuals of one block, not of the whole grid. Every block is prepared on its
+own, which is what QMI needs because its cached sort indices are valid only for
+the block they were computed on. The effective block width is balanced below
+the requested size to minimize tail padding. The grid resolution still controls
+quadrature accuracy and should not be reduced without a normalization-
+convergence check; the chunk size changes only the schedule.
 
 ### `compact_prepared_data` must be defined for every floating component type
 
@@ -216,7 +226,7 @@ Measure the device process as well when assessing a laptop's VRAM budget.
 
 On the RTX 3050 Ti (4 GiB), the 2026-09-19 end-to-end check used the notebook's
 95,074 accepted events, 41 free parameters, and one million normalization
-points per charge. With dynamic microbatching and sequential Hessian-vector
+points per charge. With dynamic microbatching (a since-removed option) and sequential Hessian-vector
 products, the full toy-0 MIGRAD+HESSE fit completed with `hessian="jax"`,
 `valid=True`, accurate covariance, EDM `9.433e-8`, and NLL
 `-494077.2905459427`. The complete diagnostic, including explicit pre-fit
@@ -240,16 +250,19 @@ full pull distribution.
 
 The shared lookup stores only a weak reference to the objective. A completed fit session can therefore be garbage-collected normally instead of being retained by the compilation cache.
 
+The backend key also distinguishes floating dynamics from coefficient-only
+parameters, since they require different Hessian memory schedules. Reusing the
+same objective and names with different parameter kinds cannot bypass the
+checkpointed, sequential-HVP path.
+
 The Minuit value and gradient callbacks also share the last evaluated parameter point, so requesting the value and gradient at the same point causes only one JAX device evaluation and one device-to-host transfer.
 
 `Minimizer(..., hessian="jax")` (or `session.fit(hessian="jax")`) adds an
 automatic Hessian for both MIGRAD and HESSE. It uses forward-over-reverse AD,
-including through QMI's custom VJPs. For floating dynamics,
-`hessian_batch_size` controls how many Hessian-vector products one compiled
-program evaluates together. Its default of 1 runs each column separately to
-minimize peak memory. For coefficient-only full Hessians, one linearization is
-reused inside a single executable and this option has no effect on the
-full-matrix evaluation.
+including through QMI's custom VJPs. For floating dynamics, each Hessian
+column is a separate Hessian-vector product, run one at a time to minimize
+peak memory. For coefficient-only full Hessians, one linearization is
+reused inside a single executable.
 The last Hessian is cached independently of the value/gradient point. Compiled
 programs are shared across minimizers of the same live objective and fixed-
 parameter layout. No Hessian program runs or compiles on the default
@@ -257,8 +270,8 @@ parameter layout. No Hessian program runs or compiles on the default
 iminuit 2.32's negative-curvature recovery can call it even when a full Hessian
 is supplied. This G2 callback now has a separate JAX program: it computes
 `H_ii` with forward-over-reverse directional derivatives inside one bounded
-`lax.map`, retaining and transferring only the diagonal. It respects
-`hessian_batch_size` and reuses an already-cached full Hessian at the same
+`lax.map`, retaining and transferring only the diagonal. It reuses an
+already-cached full Hessian at the same
 point. At a new point it does not construct or cache the full matrix.
 The full-Hessian callback remains available for MIGRAD and HESSE.
 
@@ -274,8 +287,7 @@ by the preceding HESSE measurements.
 
 A 2026-10-01 CPU check used the local `B+ -> K+K-K+` QMI CP-fit analysis
 configuration (`13_b2kkk_cpvfit_qmi.ipynb`, kept outside `notebooks/`): 137 free parameters, 335,313 data events, one million shared
-toy-MC normalization points per charge, efficiency/background maps, and
-`hessian_batch_size=1`. Two seed points differed only by `1e-4` and `2e-4`
+toy-MC normalization points per charge, efficiency/background maps. Two seed points differed only by `1e-4` and `2e-4`
 in the first free parameter. G2 was evaluated before the full Hessians to
 avoid full-Hessian cache hits; diagonals agreed within `rtol=1e-9,
 atol=1e-7`.
@@ -406,66 +418,84 @@ cache's compact evaluation path. Call `cache.check_parameters(parameters)` befor
 constructing `Minimizer` whenever the two parameter lists are not obviously the
 same object.
 
-### AD microbatching for floating-dynamics normalization on constrained GPUs
+The check compares every dynamics binding: public name, owner, backend alias,
+fixed status and fixed value. Comparing only floating component owners is
+insufficient: renaming or adding a parameter on an already-floating component
+can also produce an ignored fit direction. Free starting values, bounds and
+optimizer steps may change without rebuilding the cache.
 
-A follow-up review fixed the compatibility helper `_matrix_from_dynamic` for the
-chunked cache representation, corrected retained-memory accounting, and made
-the shared Hessian callback capture its configured batch size. It also replaced
-an invalid test assertion about private backend-tuple identity with checks that
-the compiled callbacks are actually shared; see
-[the 2026-09-19 review](reviews/20260919_dynamics_chunking_and_hessian_review.md).
+A component with `normalize_component=False` may have a zero integral without
+being rescaled; the compact cache accepts it and keeps its zero matrix row and
+column. A component requesting unit-integral normalization still requires a
+positive diagonal integral. A valid total PDF must of course have nonzero
+normalization.
 
-`normalization_chunk_size` (default 100,000) is chosen to amortize XLA
-compilation and geometry-storage cost, not to bound the memory of the reverse-AD
-pass through several floating `DYNAMICS` lineshapes at once. On a memory-constrained
-GPU, differentiating a single 100,000-point macro-chunk's worth of parametric
-lineshapes (e.g. several `GounarisSakurai`/`RelativisticBreitWigner`/`SigmaPole`
-components with barrier and angular factors) can itself exceed available memory,
-independent of how many macro-chunks the sample is split into — a 4 GB laptop
-GPU (RTX 3050 Ti) fitting a real `B -> 3pi` CP model (41 free parameters, 4
-floating-mass/width resonances, `normalization_resolution=1000` i.e.
-1,000,000-point Square-Dalitz grids per charge) hit `RESOURCE_EXHAUSTED` trying
-to allocate 1.4 GiB on the very first MIGRAD gradient call, well before ever
-reaching HESSE.
+### Memory-aware normalization chunks (`normalization_chunk_size="auto"`)
 
-`PreparedAmplitudeCache._chunked_dynamic_normalization` therefore re-splits each
-macro-chunk into `DecayModel(..., dynamics_microbatch_size=20_000)` microbatches
-via a second, nested
-`jax.lax.scan` wrapped in its own `jax.checkpoint`, so the reverse-AD pass never
-has to hold more than one microbatch's forward residuals live at a time —
-independent of `normalization_chunk_size` or the total grid size. The shown
-value is the default. This fixed
-the 1.4 GiB allocation above outright: the same model/data/GPU then ran a full
-MIGRAD+HESSE (`hessian="numerical"`) at `normalization_resolution=1000` to
-completion (`valid=True`, EDM `9.4e-8`), taking about 1066 s per toy — roughly
-proportional to the ~11x more normalization points than the 90,000-point grid
-(`normalization_resolution=300`) that already fit unchunked, confirming the added
-nested-scan/checkpoint machinery costs kernel-launch overhead, not a multiplicative
-blowup in wall time.
+`normalization_chunk_size` is a positive integer or `"auto"`, which is the
+default of `DecayModel`, `FourBodyDecayModel` and `PreparedAmplitudeCache.prepare`.
+It is the only memory option. Earlier versions also had
+`dynamics_microbatch_size`, `dynamics_microbatch_parallelism` and
+`hessian_batch_size`; they were removed (see
+[the 2026-09-19 review](reviews/20260919_dynamics_chunking_and_hessian_review.md)).
 
-Larger values reduce scan overhead and can be faster when the GPU has enough
-memory. Smaller values reduce peak gradient and Hessian memory. Changing this
-option changes only evaluation partitioning, not the normalization integral or
-its quadrature resolution.
+The reverse-mode AD pass through floating lineshapes needs memory proportional
+to the number of normalization points in one chunk. On a 4 GB GPU, one
+unchunked million-point grid through several floating lineshapes
+(a `B -> 3pi` CP model with 41 free parameters, 4 floating mass/width
+resonances) once exhausted memory with a 1.4 GiB allocation on the first
+MIGRAD gradient call. `"auto"` therefore sizes the chunk from the device:
 
-For ordinary floating-dynamics lineshapes, `dynamics_microbatch_parallelism`
-evaluates several microbatches concurrently with `jax.vmap` and reduces their
-partial normalization blocks. Its default is 1, preserving the sequential
-bounded-memory path. Values of 2 or 4 can improve throughput on larger GPUs,
-but increase peak AD memory approximately with the number of concurrent
-microbatches. The effective value is reported by
-`cache.effective_dynamics_microbatch_parallelism`; it is capped by the number
-of microbatches in one macro-chunk. QMI keeps the effective value at 1 because
-its prepared sort order is local to the complete block.
+1. **Budget.** `MEMORY_FRACTION = 0.5` of the free memory,
+   `bytes_limit - bytes_in_use` from `device.memory_stats()`. The remainder is
+   headroom for the allocator pool, the CUDA context, autotuning scratch space
+   and what is allocated after preparation. The fraction is an internal
+   constant in `amplitude/memory.py`, not a public option.
+2. **Cost per point, measured.** The forward-over-reverse Hessian-vector product
+   of the normalization is compiled, not run, on the first 20,000 points, and
+   `compiled.memory_analysis().temp_size_in_bytes / points` gives bytes per
+   point. This is the heaviest program a fit needs, so value, gradient and
+   Hessian all fit. The scaling is linear (5,000 to 40,000 points: about 533 B
+   per point for the gradient and 1,156 B for the Hessian-vector product, a
+   stable ratio of 2.17), so one probe suffices.
+3. **Resident blocks.** The prepared blocks stay on the device for the whole fit
+   whatever the chunk size; their measured size is subtracted from the budget.
+4. **Chunk.** `(budget - resident) / bytes_per_point`, between 2,048 points and
+   the sample size, then balanced to minimize padding. If the whole sample fits
+   there is a single block and no scan.
 
-For a floating component whose lineshape sets
-`prepared_mass_is_order_dependent = True` (currently only `QMI`), preparation
-itself uses blocks no larger than `dynamics_microbatch_size`. `QMI.prepare_mass`
-sorts one prepared block by knot interval and returns `order`/`starts`/`ends`
-indices valid only for that exact block, so reshaping a larger prepared block
-would desynchronize those indices from the custom VJP. `KMatrix.prepare_mass`
-stores pointwise per-event responses and uses the ordinary inner microbatch
-path.
+Without device memory statistics (the CPU backend, or
+`XLA_PYTHON_CLIENT_ALLOCATOR=platform`) the previous fixed 100,000 is used and no
+probe is compiled; samples of at most 20,000 points are one block. The result
+is memoized per model, so a toy loop compiles the probe once. Low-level callers
+of `PreparedAmplitudeCache.prepare` can pass `chunk_size_memo` to share it. An
+`INFO Jax-PWA normalization: automatic chunk size ...` line reports the choice.
+
+Measured on the RTX 3050 Ti (4 GiB) with a two-floating-component model
+(Gounaris-Sakurai rho plus a Hermite QMI S-wave) and a one-million-point grid,
+for one value+gradient plus one Hessian-vector product:
+
+| chunk | peak live JAX | process VRAM | first call | warm value+grad |
+|---|---:|---:|---:|---:|
+| whole grid (what `"auto"` chose, 1185 B/point) | 852 MiB | 2926 MiB | 37.4 s | 49 ms |
+| 100,000 | 271 MiB | 1024 MiB | 11.0 s | 74 ms |
+
+NLL, gradient norm and Hessian-vector-product norm were identical to six
+decimals. A smaller chunk lowers memory and the first-call compilation time and
+costs about 50% in warm time, because of the scan. With
+`XLA_PYTHON_CLIENT_MEM_FRACTION=0.3`, `"auto"` chose 379,553 points (three
+blocks of 333,334); with `0.15`, 129,145 points (eight blocks of 125,000), with
+unchanged results. If cold-start time matters more than warm time, pass an
+integer such as `100_000`.
+
+Limits of the estimate. It covers the normalization side only: the data-side
+amplitudes of floating components are evaluated on all events at once and are not
+bounded by the chunk size. The budget counts the program's temporary buffers and
+the resident blocks, not what other programs (the Hessian-vector product of the
+full NLL, data amplitudes, other processes sharing the GPU) allocate later; the
+`0.5` margin is a heuristic validated on the model above, not on the
+137-parameter analysis fits. `peak_bytes_in_use` also includes the preparation
+phase, so it is not a clean measure of the AD pass.
 
 ### Bounded-memory `hessian="jax"` for floating dynamics
 
@@ -476,7 +506,7 @@ reduced its program estimate substantially, but the real notebook model still
 required about 3.30 GiB at 500-by-500 resolution. That exceeded the default
 BFC allocator's 2.76 GiB pool on the 4 GiB RTX 3050 Ti.
 
-For floating `DYNAMICS` parameters, `Minimizer` now checkpoints the gradient
+For floating `DYNAMICS` parameters, `Minimizer` checkpoints the gradient
 and compiles a single forward-over-reverse Hessian-vector product:
 
 ```python
@@ -486,61 +516,13 @@ hvp = jax.jit(lambda point, tangent: jax.jvp(
 )[1])
 ```
 
-With the default `hessian_batch_size=1`, the host invokes this reusable program
+The host invokes this reusable program
 once per basis vector and transfers each column before starting the next.
 Temporary buffers from different columns therefore cannot overlap, and XLA
 compiles one HVP rather than a program that contains the entire Hessian loop.
 The differentiation remains
 forward-over-reverse, preserving QMI's grouped custom-VJP reductions. The
 result is symmetrized once after the columns are assembled, as before.
-
-On a larger GPU, `hessian_batch_size=2`, `4`, or `8` evaluates that many HVPs
-with `jax.vmap` in each device execution. This trades temporary memory for fewer
-launches and more parallel work. For example:
-
-```python
-model = DecayModel(
-    channel,
-    components,
-    dynamics_microbatch_size=100_000,
-)
-session = FitSession(model, data)
-result = session.fit(
-    hessian="jax",
-    hessian_batch_size=4,
-    strategy=1,
-)
-```
-
-Tune the two options independently: increase `dynamics_microbatch_size` first
-for the repeatedly evaluated likelihood/gradient, then benchmark
-`hessian_batch_size` for automatic-Hessian calls. If either setting exhausts
-VRAM, reduce it. The defaults (`20_000` and `1`) retain the validated 4 GiB
-behavior.
-
-To compare macro- and microbatch combinations on a target GPU, run:
-
-```bash
-python benchmarks/benchmark_dynamics_chunking_sweep.py \
-  --events 100000 --normalization-resolution 500 \
-  --chunk-sizes 50000,100000,200000 \
-  --microbatch-sizes 20000,25000,40000,50000,100000
-```
-
-Both size options are upper bounds. For `N=250000`, for example, a requested
-macro limit of 200000 becomes two effective blocks of 125000 instead of two
-fixed blocks totaling 400000 positions; an inner limit of 100000 then becomes
-62500, giving exact division at both levels. When exact division is impossible
-with one static XLA shape, the balanced layout leaves fewer padded positions
-than the number of blocks rather than a large partial tail. Inspect
-`cache.effective_normalization_chunk_size`,
-`cache.effective_dynamics_microbatch_size`,
-`cache.normalization_padding_points`, and
-`cache.normalization_padding_fraction` after preparation. The sweep benchmark
-reports the requested and effective sizes plus the residual fraction. Compare
-steady objective time as well as compilation and preparation time; retained
-cache size is controlled mainly by the macro chunk representation and need not
-fall with a smaller microbatch.
 
 Coefficient-only fits keep the previous single-linearization program. They do
 not need the extra memory boundary, and a small eight-parameter GPU benchmark

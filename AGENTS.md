@@ -23,7 +23,7 @@ assume the literal upstream formula is followed if the docstring says otherwise.
 ```bash
 python -m pip install -e ".[dev]"     # install with test + ruff extras
 
-pytest                                 # full suite (testpaths = tests/, ~770 tests, several minutes)
+pytest                                 # full suite (testpaths = tests/, ~840 tests, ~17 min on CPU)
 pytest tests/test_rescattering2.py -v  # single file
 pytest tests/test_rescattering2.py::test_rescattering2_matches_laura_reference_points  # single test
 
@@ -36,7 +36,15 @@ python benchmarks/benchmark_scf_migration.py --bins-mprime 40 --bins-thetaprime 
 python benchmarks/benchmark_cache_stages.py --events 100000 --normalization-resolution 1000
 python benchmarks/benchmark_qmi_memory_speed.py
 python benchmarks/benchmark_time_dependent.py --resolution 20
+
+python scripts/generate_wiki.py ../Jax-PWA.wiki   # regenerate the GitHub wiki API reference
+pip install -e ".[docs]" && sphinx-build -b html docs docs/_build/html   # Read the Docs site
 ```
+
+The GitHub wiki (`JuanBSLeite/Jax-PWA.wiki`, a separate repository) and the API pages of the
+Read the Docs site are both generated from `docs/catalog.md` plus the public docstrings, so a
+new or renamed name in `jaxpwa.__all__` needs a catalog row first: the wiki generator fails on
+any exported name missing from the catalog.
 
 CI (`.github/workflows/tests.yml`) runs `pytest tests` on Python 3.12, 3.13, and 3.14, plus a notebook
 sanity check that parses every notebook under `notebooks/tutorials/`, `notebooks/examples/`,
@@ -82,8 +90,9 @@ through the low-level classes directly; see `docs/user_friendly_api.md` "Design 
 
 `Minimizer.fit(method="nesterov")` provides a projected, parameter-scaled
 Nesterov first-order fit. `method="nesterov-minuit"` runs that prefit before
-the existing Minuit strategy 1/2 stages. Invalid or worsened MIGRAD results
-are rejected, and a later stage cannot replace an earlier stage with a higher
+the existing Minuit strategy 1/2 stages. Non-finite or worsened continuations
+are rejected; an invalid continuation that does not raise the NLL is returned with
+its invalid status. A later stage cannot replace an earlier stage with a higher
 NLL. Nesterov-only results have no covariance and must not be used for
 uncertainty reporting without a separate Hessian calculation.
 
@@ -94,10 +103,14 @@ uncertainty reporting without a separate Hessian calculation.
 `gounaris_sakurai.py`, `flatte.py`, `babar_flatte.py`, `pole.py` (`Pole`, `SigmaPole`),
 `lass.py`, `kmatrix.py`, `qmi.py`, `rescattering2.py`, `pipi_kk_rescattering.py`, `rho_omega.py`,
 plus `sympy.py`'s `SympyLineshape` for user-written symbolic lineshapes via the optional `sympy`
-extra) combined with an angular factor (`dynamics/angular.py`) and Blatt-Weisskopf
-barriers. `DalitzAmplitude` bypasses that isobar construction entirely for amplitudes that are
-intrinsically two-dimensional (`QMI2D`, `dynamics/qmi2d.py`), evaluated directly over
-`(s12, s13)`.
+extra) combined with an angular factor (`dynamics/angular.py`, default `CovariantAngular`) and
+Blatt-Weisskopf barriers. `DalitzAmplitude` bypasses that isobar construction entirely for
+amplitudes that are intrinsically two-dimensional (`QMI2D`, `dynamics/qmi2d.py`;
+`PolarFormFactorSymNR`, `dynamics/polar_form_factor_nr.py`, the Laura++ symmetrized polar
+form-factor non-resonant term), evaluated directly over `(s12, s13)`.
+
+`KMatrix` (`kmatrix.py`) returns the pi-pi channel (row 0 of `(I - i K rho)^-1 P`); a fit
+observing another channel (e.g. K+K-) must select that row itself.
 
 `QMI`'s `interpolation="cubic"` is not a cubic spline in the usual sense: it is a strictly local
 smoothstep between the two knots bordering an event's interval, and that locality is exactly what
@@ -148,6 +161,29 @@ ignoring that parameter — a structural zero gradient, not an approximate one, 
 Call `cache.check_parameters(parameters)` before handing a separately-built parameter list to
 `Minimizer`; see `docs/performance.md`.
 
+The same structural zero gradient appears when a parameter that floats *inside* a component's
+dynamics is created as `Parameter.coefficient`: coefficient-only preparation caches the
+lineshape/2D amplitude once, so the NLL is flat in that parameter. Anything nested in the
+dynamics (QMI/QMI2D nodes, the `PolarFormFactorSymNR` scale, K-matrix production `betas`/`f_prod`,
+a floating mass/width) must be `Parameter.dynamics` with the component as `owner`. `QMI`,
+`QMI2D` and `PolarFormFactorSymNR` reject a floating non-dynamics parameter; other lineshapes
+(e.g. `KMatrix`'s complex `betas`) do not check, so verify that a fit actually moves them.
+
+### Memory: `normalization_chunk_size` is the only knob
+
+With floating dynamics, the normalization grid is prepared in blocks that are accumulated with
+`jax.lax.scan` and checkpointed, so gradients and Hessian-vector products keep the forward
+residuals of one block only. `normalization_chunk_size` (a positive integer or `"auto"`, the
+default of `DecayModel`, `FourBodyDecayModel` and `PreparedAmplitudeCache.prepare`) sets that
+block size. `"auto"` (`amplitude/memory.py`) compiles, without running, a Hessian-vector-product
+probe on 20,000 points, reads XLA's temporary memory per point and divides
+`MEMORY_FRACTION = 0.5` of the free device memory (minus the resident prepared blocks) by it;
+without device memory statistics (CPU, or `XLA_PYTHON_CLIENT_ALLOCATOR=platform`) it falls back
+to 100,000 points. The chunk size changes only the schedule, never the quadrature: the grid
+resolution controls accuracy. The former `dynamics_microbatch_size`,
+`dynamics_microbatch_parallelism` and `hessian_batch_size` options were removed; do not
+reintroduce per-call memory knobs without the benchmark in `docs/performance.md`.
+
 ### CP fits share one normalization across charges
 
 `CPJointNLL` (`likelihood/cp.py`) treats charge as part of the fitted sample space: B+/B- are
@@ -166,6 +202,19 @@ isobar PDF is then normalized on its own (`|A_plus|^2 / I_plus`, `|A_minus|^2 / 
 of jointly, so `N_plus`/`N_minus` are already standalone per-charge counts — `cp_workflow.py`'s
 signal-projection scaling must *not* reweight them by `integral_q / norm` the way a shared
 `signal_yield` is. See `docs/cp_coefficients.md`, "Yield-asymmetry parameterization".
+
+Event-weighted (sWeight/COW) CP fits keep the same joint normalization: `CPFitSession.fit(
+weights=(plus, minus), covariance=...)` or a session built with `with_event_weights(plus, minus)`
+minimizes the signal-only `-sum_i w_i log S_q(phi_i)`, with the weighted sums playing the role of
+the per-charge counts. Weighted sessions must be signal-only (no background, `signal_fraction`,
+`signal_yield` or `extended`) and are validated on construction. `covariance="sandwich"`
+(recommended for signed weights) installs the Godambe covariance
+`H_w^-1 (sum_i w_i^2 s_i s_i^T) H_w^-1`, `"sumw2"`/`"sweight"` installs `H_w^-1 H_w2 H_w^-1`,
+and `"minuit"` keeps the uncorrected HESSE. Both corrections treat the weights as fixed and do
+not include the uncertainty of the fit that produced them. With signed weights the exact
+Hessian can be indefinite away from the minimum, so MIGRAD searches with a numerical curvature
+and the exact JAX Hessian is used only for the covariance. See `docs/cp_coefficients.md`,
+"Event-weighted (sWeight/COW) CP fits".
 
 ### Time-dependent neutral-meson mixing
 
@@ -271,3 +320,14 @@ unit integral; use `clip=True` only when reproducing the reference convention
 that bounds interpolated efficiencies to `[0, 1]`. Square-Dalitz backgrounds use
 `divide_jacobian=True` for PDF evaluation and their raw `generation_value()` for
 toy generation. Apply vetoes before acceptance/background normalization.
+
+### One-dimensional discriminating-variable PDFs reject invalid points
+
+`Chebyshev1D` (RooChebychev polynomial/integral convention) returns NaN everywhere for a
+coefficient point that makes the polynomial negative anywhere on its support, instead of
+clipping (clipping broke the analytic normalization). `SumPDF1D` (recursive RooAddPdf
+fractions) rejects invalid constant fractions on construction and returns NaN for fitted
+fractions outside `[0, 1]`. `CrystalBall1D` evaluates its power-law tail in log space, so
+extreme `n/alpha` stays finite. A NaN NLL from these PDFs therefore signals an unphysical
+parameter point, not a numerical bug; do not replace it with a finite floor. See
+`docs/discriminants_and_constraints.md`.

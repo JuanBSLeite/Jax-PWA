@@ -99,6 +99,34 @@ error correct rather than a naive quadrature sum. See `docs/fitting.md`
 ("Fit fraction errors") and `docs/catalog.md` ("Delta-method error
 propagation").
 
+### Integrated CP asymmetry per component
+
+`CPFitSession.component_cp_asymmetries(result)` returns, for every amplitude
+component,
+
+```text
+A_CP(k) = (I_k^- - I_k^+) / (I_k^- + I_k^+),   I_k^q = integral |c_k^q A_k^q|^2 dPhi
+```
+
+with `I_k^q` from `PreparedAmplitudeCache.component_intensities` (the
+numerators of the fit fractions, on the common integration scale both charges
+share). It differs from the coefficient asymmetry above whenever a component's
+dynamics carry charge-dependent parameters: a QMI S-wave with a fixed global
+coefficient and per-node `CPRealImag` nodes has a zero coefficient `A_CP` by
+construction, but its integrated `A_CP` is the CP asymmetry of the whole
+S-wave. It is physical (efficiency excluded) by default;
+`acceptance_weighted=True` weights both integrals by each charge's efficiency.
+Errors propagate the joint postfit covariance through both charges in one
+Jacobian (NaN when the result has no covariance). With `YieldAsymmetry`, the
+integrated amplitude-level asymmetry is still well defined, but it is not the
+counting asymmetry of the fitted yields. The calculation respects component
+normalization: with `normalize_component=True`, each physical diagonal
+integral is one and its raw dynamics scale cancels. To retain an integrated
+charge asymmetry from QMI nodes at a fixed global coefficient, use the common
+unnormalized component convention (`normalize_component=False`) on both
+charges. A component with no free amplitude parameters has zero propagated
+error when a covariance exists only for yields or backgrounds.
+
 ## Efficiency and background mixtures
 
 `CPJointNLL` also supports efficiency-weighted signal and background while preserving the same joint charge normalization.
@@ -267,6 +295,91 @@ nll = CPJointNLL(plus_cache, minus_cache, extended=True, signal_yield=signal_yie
 `total` and `asymmetry` may be ordinary numbers or `Parameter` objects, and
 `CPFitSession(..., signal_yield=signal_yield)` collects their `Parameter`s
 the same way it collects a plain `signal_yield` `Parameter`.
+
+### Event-weighted (sWeight/COW) CP fits
+
+`CPFitSession.fit(weights=(plus_weights, minus_weights), covariance=...)`
+subtracts background with per-event signal weights (sWeights or COWs from a
+fit to a discriminating variable such as the B mass) instead of modelling it
+in the Dalitz plot. One weight array per charge, aligned with
+`plus_data`/`minus_data`. The objective is the signal-only weighted
+estimating function over the joint `(Dalitz, charge)` space,
+
+```text
+Q(theta) = - sum_{i in B+} w_i log S_plus(phi_i) - sum_{j in B-} w_j log S_minus(phi_j)
+S_q(phi) = eps_q(phi) |A_q(phi)|^2 / (I_plus + I_minus),
+```
+
+i.e. the same joint normalization as the unweighted fit. The charge
+asymmetry is therefore still measured through `I_plus`/`I_minus`: the
+weighted sums `W_plus = sum w_i` and `W_minus = sum w_j` play the role of the
+per-charge signal counts. For a single non-resonant component with fixed
+`x = 1` the weighted fit reduces exactly to a weighted Bernoulli in charge,
+`(1+dx)^2 / [(1+dx)^2 + (1-dx)^2] = W_plus / (W_plus + W_minus)`, which
+`tests/test_cp_workflow.py` uses as a closed-form check of the fitted value
+and of both corrected covariances.
+
+`covariance` follows `FitSession.fit` (see the
+[sWeight / COW section of fitting.md](fitting.md#sweight--cow-dalitz-fits)):
+`"sandwich"` (recommended for signed weights) installs the fixed-weight
+Godambe covariance with the score-outer matrix summed over both charges,
+`"sumw2"` (alias `"sweight"`) the squared-weight Hessian correction, and
+`"minuit"` keeps Minuit's uncorrected HESSE. Both share one implementation
+with `FitSession`, including the postfit-only `hessian="jax"` behaviour and
+the warnings for invalid or Nesterov-endpoint results. Neither correction
+propagates the uncertainty of the mass fit that produced the weights.
+
+A weighted session must be signal-only: no `backgrounds`, `signal_fraction`,
+`signal_yield`/`YieldAsymmetry` or `extended=True` (the background is what the
+weights remove; there is no extended Poisson term). Efficiency and vetoes are
+kept: they enter the normalization `I_q`, and the efficiency factor in the
+numerator is a parameter-independent additive constant in `log S_q`. Events
+with zero weight do not contribute, even where the signal density vanishes.
+`session.with_event_weights(plus_weights, minus_weights)` attaches the weights
+to the session instead, so the rest of a workflow can stay unchanged: its
+`objective` (and therefore `minimizer()`/`fit_multistart()`) is the weighted
+one, `fit()` uses the session weights unless `weights=` is passed, and
+`plot_projection`/`plot_projection_from_toy`/`prepare_projection_toy` scale the
+signal model to the weighted sums `W_plus + W_minus` (split by `I_plus`/`I_minus`)
+and draw weighted data histograms with `sqrt(sum w^2)` errors; their pulls use
+`(o - e) / sqrt(sum w^2 + sigma_MC^2)`. The binned goodness-of-fit methods
+(`goodness_of_fit_projection`, `goodness_of_fit_chi2`) histogram the per-bin
+sum of weights and use each bin's sum of squared weights as its variance,
+`chi2 = sum (sum w - e)^2 / sum w^2` (`chi2_from_histograms(observed_variance=)`);
+that variance is estimated from the bin's own events, so the chi2 law is only
+asymptotic and the bins must be well populated. The unbinned
+`point_to_point_dissimilarity` assumes unweighted events and raises
+`NotImplementedError` on an event-weighted session.
+
+Session construction validates weight shapes, finiteness and incompatible
+background/yield settings immediately, before preparing amplitude caches.
+The `weights=` argument affects only that fit invocation; use
+`with_event_weights` with the same weights to obtain weighted projections
+and the matching weighted goodness-of-fit tests afterward.
+
+The low-level equivalent is `CPJointNLL(..., plus_weights=..., minus_weights=...)`,
+and `CPJointNLL.signal_log_densities(parameters)` returns the per-event
+`(log S_plus, log S_minus)` used by both.
+
+### Amplitude components on projections
+
+`CPFitSession.plot_projection(...)` and `plot_projection_from_toy(...)` accept
+`show_amplitude_components=True`. Each signal component `k` is then drawn as
+its incoherent contribution `|c_k A_k|^2`, on the signal scale: every rendering
+event (weighted phase-space MC or generated toy) keeps its signal weight times
+`|c_k A_k|^2 / |sum_j c_j A_j|^2`, so the same folding, selection and binning
+apply. The components do not add up to the signal; on a linear y axis the
+remainder is drawn as `interference`. The per-component amplitudes come from
+`DecayModel.component_amplitudes(data, values)`, whose coherent sum is
+`DecayModel.amplitude(data, values)`.
+
+With many components the legend crowds the histograms: `legend_panel=True`
+(both methods, `axes=None`) moves it to a separate column on the right of the
+figure, shared by the two charges, and `extra_panel=True` adds an empty panel
+below it (`figure.extra_axes`) for the caller, e.g. a Dalitz map of the
+projected region. `share_y=True` gives the two charges one common y axis
+(histograms and pulls), labelled on the left panel only. The return value is
+unchanged.
 
 ## B± -> K± pi+ pi- tutorial convention
 

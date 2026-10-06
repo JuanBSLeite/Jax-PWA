@@ -7,6 +7,8 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 import numpy as np
 
+from jaxpwa._quadrature import legendre_rule
+
 from .sample import PhaseSpaceSample
 
 
@@ -167,7 +169,7 @@ def _quadrature_axis(n: int, quadrature: str) -> tuple[jnp.ndarray, jnp.ndarray]
         nodes = (np.arange(n, dtype=np.float64) + 0.5) / n
         stored_weights = np.ones(n, dtype=np.float64)
     elif quadrature in ("gauss", "gauss-legendre"):
-        x, w = np.polynomial.legendre.leggauss(n)
+        x, w = legendre_rule(n)
         nodes = 0.5 * (x + 1.0)
         stored_weights = 0.5 * n * w
     else:

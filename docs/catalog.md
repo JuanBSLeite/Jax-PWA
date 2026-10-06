@@ -109,8 +109,9 @@ Docs: `docs/dynamics_structure.md`, `docs/lineshapes.md`.
 |---|---|---|
 | `QMI2D` | class | Complex amplitude field defined bin-by-bin over `(s12, s13)`; three interpolation modes (`none`/`linear`/`cubic`), optional identical-particle folding. |
 | `physical_bin_mask` | function | Mark which `QMI2D` grid cells intersect the physical Dalitz boundary, using the exact analytic boundary. |
+| `PolarFormFactorSymNR` | class | Laura++ `LauPolarFormFactorSymNR` nonresonant amplitude for symmetric Dalitz plots, `1/(1+s/lambda^2) + 1/(1+t/lambda^2)` (or the `min(s,t)` no-interference form). |
 
-Docs: `docs/lineshapes.md` ("QMI2D Dalitz amplitude").
+Docs: `docs/lineshapes.md` ("QMI2D Dalitz amplitude", "Polar form-factor nonresonant amplitude").
 
 ## Kinematics and phase space
 
@@ -164,7 +165,7 @@ These are what `FitSession`/`CPFitSession` compose automatically; use them direc
 | `NeutralMesonMixing` | class | Exact neutral-meson time kernel with x, y, lifetime and complex q/p; see [time-dependent fits](time_dependent.md). |
 | `TimeDependentMixtureNLL` | class | Multiple normalized Dalitz-time backgrounds with floating fractions or extended yields and component tag probabilities; see `docs/time_dependent.md`. |
 | `TimeDependentDalitzNLL` | class | Tagged time-dependent Dalitz signal NLL, coherent A/Abar overlap, factorized acceptance and optional Gaussian time resolution; see [time-dependent fits](time_dependent.md). |
-| `CPJointNLL` | class | Unbinned NLL for simultaneous B+/B- fits with one joint `(Dalitz, charge)` normalization — charge is part of the sample space, not fit independently per charge. |
+| `CPJointNLL` | class | Unbinned NLL for simultaneous B+/B- fits with one joint `(Dalitz, charge)` normalization — charge is part of the sample space, not fit independently per charge. Optional `plus_weights`/`minus_weights` give the signal-only sWeight/COW objective. |
 | `YieldAsymmetry` | class | Extended-fit `signal_yield` replacement splitting a total `N_s` into independent `N_plus`/`N_minus` via a yield asymmetry, overriding `CPJointNLL`'s default amplitude-driven charge split. |
 
 Docs: `docs/fitting.md`, `docs/cp_coefficients.md`, `docs/backgrounds_and_vetoes.md`, `docs/scf.md`, `docs/performance.md`, `docs/time_dependent.md`.
@@ -279,7 +280,9 @@ Docs: `docs/toy_generation.md`. Notebooks: `notebooks/tests/user_friendly_toy_ge
 |---|---|---|
 | `Gaussian1D` | class | Gaussian PDF normalized on a finite interval. |
 | `Exponential1D` | class | Exponential PDF `exp(slope*x)` normalized on a finite interval. |
-| `CrystalBall1D` | class | Crystal Ball PDF (Gaussian core, left power-law tail; `scipy.stats.crystalball` convention) with closed-form normalization on a finite interval. |
+| `Chebyshev1D` | class | Chebyshev-polynomial background PDF (`RooChebychev` convention) with closed-form normalization on a finite interval. See [discriminants_and_constraints.md](discriminants_and_constraints.md). |
+| `CrystalBall1D` | class | Crystal Ball PDF (Gaussian core, left power-law tail, or right tail for negative `alpha`; `scipy.stats.crystalball` convention) with closed-form normalization on a finite interval. |
+| `SumPDF1D` | class | Recursive-fraction sum of normalized 1D PDFs (`RooAddPdf` convention), e.g. Gaussian + two-sided Crystal Ball mass models. See [discriminants_and_constraints.md](discriminants_and_constraints.md). |
 | `Histogram1D` | class | Piecewise-constant normalized histogram PDF from edges + values. |
 | `BreitWigner1D` | class | Constant-width Breit-Wigner PDF normalized on a finite mass interval. |
 | `LineshapeIntensity1D` | class | Turn an existing complex dynamics lineshape (e.g. `RelativisticBreitWigner`) into a normalized 1D intensity PDF. |
@@ -324,7 +327,7 @@ array already ordered like the requested parameter names. Docs:
 | Name | Kind | What it does |
 |---|---|---|
 | `BinnedChi2Result` | class | Binned Pearson chi2 result: chi2, dof bounds, p-value bounds, per-bin pulls and edges. |
-| `chi2_from_histograms` | function | Low-level binned Pearson chi2 test between observed/expected count arrays (1D or 2D). |
+| `chi2_from_histograms` | function | Low-level binned Pearson chi2 test between observed/expected count arrays (1D or 2D); `observed_variance=` (e.g. per-bin sum of squared sWeights/COW weights) replaces the Poisson variance. |
 | `PointToPointResult` | class | Point-to-point dissimilarity (PPD) result: statistic, permutation-test p-value. |
 | `point_to_point_dissimilarity` | function | Low-level unbinned PPD test (Williams, arXiv:1006.3019) between plain coordinate/density arrays. |
 | `kdtree_local_residuals` | function | Adaptive k-neighbour local-residual diagnostic: per-point Pearson pulls from a KD-tree-selected neighbourhood, in any coordinate pair. |
@@ -356,7 +359,8 @@ Composition layers over everything above; see `docs/user_friendly_api.md` "Desig
 | Name | Kind | What it does |
 |---|---|---|
 | `FitSession` | class | Compose PDF + likelihood + backgrounds + constraints + minimizer for one sample in a few lines; `fit()`, `report()`, `plot_projection()`, `goodness_of_fit_projection()`/`goodness_of_fit_chi2()`/`point_to_point_dissimilarity()`, `.from_root(...)`. |
-| `CPFitSession` | class | Same composition for simultaneous B+/B- fits over `CPJointNLL`; shared `Parameter`s collected once; same goodness-of-fit methods, per charge. |
+| `CPFitSession` | class | Same composition for simultaneous B+/B- fits over `CPJointNLL`; shared `Parameter`s collected once; same goodness-of-fit methods, per charge. `fit(weights=(plus, minus), covariance="sandwich")` or `with_event_weights(plus, minus)` runs a signal-only sWeight/COW fit; `plot_projection(..., show_amplitude_components=True)` also draws each amplitude component and the interference ([cp_coefficients.md](cp_coefficients.md#event-weighted-sweightcow-cp-fits)). |
+| `CPFitSession.component_cp_asymmetries` | method | Integrated CP asymmetry `(I_k^- - I_k^+)/(I_k^- + I_k^+)` of every component, including CP violation in its dynamics (e.g. a QMI S-wave's nodes), with joint-covariance delta-method errors. See `docs/cp_coefficients.md`. |
 | `CPProjectionToy` | class | Reusable host signal/background toys returned by `CPFitSession.prepare_projection_toy`; `plot_projection_from_toy` preserves all CP projection options. See [generated CP projections](user_friendly_api.md#cp-projections-from-generated-toys). |
 | `TimeDependentFitSession` | class | Composes `TimeDependentDalitzNLL`: builds the shared A+Abar `PreparedAmplitudeCache` (Abar derived by reflection unless an explicit `abar_model` is given, for direct CPV) and collects `Parameter`s from the model(s) and `mixing`. `fit()`/`fit_multistart()`/`report()`/`print_result()`/`print_fit_fractions()`/`fit_fraction_errors()`, Supports `.with_background(...)`, conditional fractions or extended yields with component tag fractions; `signal_objective` retains the signal kernel. Projections include all backgrounds when marginal callbacks are available. `plot_time_projection()` overlays each tag's decay-time histogram against the exact Dalitz-integrated curve (unit acceptance/perfect resolution only). `plot_projection()` overlays each tag's Dalitz-variable histogram (one subplot per tag) against the time-integrated, tag-conditional density, mirroring `CPFitSession.plot_projection`'s two-population layout. |
 

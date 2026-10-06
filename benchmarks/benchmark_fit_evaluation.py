@@ -183,9 +183,8 @@ def main() -> None:
     cache, cache_seconds = _seconds(lambda: session.signal_cache)
     _, cache_reuse_seconds = _seconds(lambda: session.signal_cache)
 
-    # Second dataset: normalization is already cached on the DecayModel. The
-    # first data-only preparation may still include compilation of that smaller
-    # executable.
+    # Second dataset: normalization and the data executable are already cached
+    # on DecayModel. The same shapes/dtypes reuse the first preparation's JIT.
     second_data, second_data_seconds = _seconds(
         lambda: model.generate_phase_space(args.events, seed=args.seed + 1)
     )

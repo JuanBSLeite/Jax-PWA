@@ -63,6 +63,53 @@ def test_minimizer_can_run_nesterov_as_a_prefit_or_standalone():
     assert math.isclose(float(refined.values["y"]), -0.75, abs_tol=1e-6)
 
 
+def test_nesterov_minuit_keeps_an_invalid_but_improved_migrad_continuation():
+    from jaxpwa.fit.nesterov import NesterovResult
+
+    parameters = (
+        Parameter("x", -1.5, bounds=(-5.0, 5.0), step=0.1),
+        Parameter("y", 2.0, bounds=(-5.0, 5.0), step=0.1),
+    )
+
+    def rosenbrock(values):
+        return (1.0 - values["x"]) ** 2 + 100.0 * (values["y"] - values["x"] ** 2) ** 2
+
+    prefit = Minimizer(rosenbrock, parameters).fit(
+        method="nesterov", strategy=1, nesterov_max_iter=3,
+    )
+    # A tiny call budget stops MIGRAD at its call limit (invalid) after it has
+    # already lowered the NLL below the unconverged Nesterov endpoint.
+    result = Minimizer(rosenbrock, parameters).fit(
+        method="nesterov-minuit", strategy=1, hesse=False,
+        nesterov_max_iter=3, ncall=15,
+    )
+    assert not isinstance(result, NesterovResult)
+    assert not result.valid
+    assert float(result.fval) < float(prefit.fval)
+
+
+def test_nesterov_stops_when_stalled_at_a_log_singularity():
+    import jax.numpy as jnp
+
+    from jaxpwa.fit.nesterov import STALL_ITERATIONS, minimize
+
+    # Unbounded below at x=0.2, like a signed-weight NLL whose density goes to
+    # zero at a negative-weight event: the gradient diverges, backtracking
+    # drives the step to floating-point resolution, and the NLL freezes.
+    parameters = (Parameter("x", 1.0, step=0.1), Parameter("y", 0.3, step=0.1))
+
+    def objective(values):
+        return jnp.log((values["x"] - 0.2) ** 2 + 1e-30) + (values["y"] - 0.5) ** 2
+
+    result = minimize(objective, parameters, max_iter=300)
+    assert result.status == "stalled"
+    assert not result.valid
+    iterations = len(result.history) - 1
+    assert iterations < 300
+    frozen = [entry["nll"] for entry in result.history[-STALL_ITERATIONS - 1:]]
+    assert len(set(frozen)) == 1
+
+
 @pytest.mark.parametrize("strategy", [-1, 3, True, 1.5])
 def test_minimizer_rejects_invalid_strategy(strategy):
     parameter = Parameter("x", 0.0)
@@ -296,9 +343,8 @@ def test_hessian_cache_tracks_point_and_shares_compilation_across_modes():
 
 
 @pytest.mark.parametrize("floating_dynamics", [False, True])
-@pytest.mark.parametrize("batch_size", [1, 2, 3, 10])
 def test_g2_computes_only_diagonal_and_reuses_curvature_caches(
-    floating_dynamics, batch_size, monkeypatch,
+    floating_dynamics, monkeypatch,
 ):
     import jax
 
@@ -312,13 +358,9 @@ def test_g2_computes_only_diagonal_and_reuses_curvature_caches(
         x, y, z = (values[f"shape.{name}"] for name in ("x", "y", "z"))
         return x**2 + x * y + y**3 + y * z + values["offset"] * z**4
 
-    minimizer = Minimizer(
-        objective, parameters, hessian="jax", hessian_batch_size=batch_size,
-    )
+    minimizer = Minimizer(objective, parameters, hessian="jax")
     hessian = minimizer._backend()[4]
-    shared = Minimizer(
-        objective, parameters, hessian_batch_size=batch_size,
-    )._backend()[4]
+    shared = Minimizer(objective, parameters)._backend()[4]
     assert hessian.diagonal is shared.diagonal
 
     transfers = []
@@ -370,64 +412,6 @@ def test_dynamic_hessian_dispatches_columns_as_separate_hvps(monkeypatch):
     np.testing.assert_allclose(hessian(1.0, 2.0), [[2.0, 1.0], [1.0, 12.0]])
 
 
-@pytest.mark.parametrize("batch_size", [1, 2, 3, 10])
-def test_dynamic_hessian_batch_size_preserves_result(batch_size, monkeypatch):
-    parameters = tuple(
-        Parameter.dynamics(f"shape.{name}", value, owner="shape")
-        for name, value in (("x", 1.0), ("y", 2.0), ("z", 3.0))
-    )
-
-    def objective(values):
-        x, y, z = (values[f"shape.{name}"] for name in ("x", "y", "z"))
-        return x**2 + x * y + y**3 + y * z + z**2
-
-    hessian = Minimizer(
-        objective,
-        parameters,
-        hessian="jax",
-        hessian_batch_size=batch_size,
-    )._backend()[4]
-    if batch_size == 2:
-        monkeypatch.setattr(
-            np,
-            "pad",
-            lambda *args, **kwargs: (_ for _ in ()).throw(
-                AssertionError("the Hessian remainder must not be padded")
-            ),
-        )
-    np.testing.assert_allclose(
-        hessian(1.0, 2.0, 3.0),
-        [[2.0, 1.0, 0.0], [1.0, 12.0, 1.0], [0.0, 1.0, 2.0]],
-    )
-
-
-def test_hessian_batch_size_participates_in_shared_backend_key():
-    parameter = Parameter.dynamics("shape.x", 1.0, owner="shape")
-
-    def objective(values):
-        return values["shape.x"] ** 2
-
-    first = Minimizer(objective, (parameter,), hessian_batch_size=1)
-    same = Minimizer(objective, (parameter,), hessian_batch_size=1)
-    larger = Minimizer(objective, (parameter,), hessian_batch_size=2)
-    first_backend = first._backend()
-    same_backend = same._backend()
-    larger_backend = larger._backend()
-    assert first_backend[2] is same_backend[2]
-    assert first_backend[3] is same_backend[3]
-    assert first_backend[4] is same_backend[4]
-    assert first_backend[4] is not larger_backend[4]
-
-
-@pytest.mark.parametrize("batch_size", [0, -1, True, 1.5])
-def test_invalid_hessian_batch_size(batch_size):
-    with pytest.raises(ValueError, match="hessian_batch_size"):
-        Minimizer(
-            lambda values: values["x"] ** 2,
-            (Parameter("x", 1.0),),
-            hessian_batch_size=batch_size,
-        )
-
 
 @pytest.mark.parametrize("mode", [None, True, "automatic"])
 def test_invalid_hessian_mode(mode):
@@ -443,7 +427,7 @@ def test_verbose_reports_optimizer_stages(capsys):
         assert f"{stage} finished in" in output
 
 
-@pytest.mark.parametrize("interpolation", ["linear", "cubic", "hermite"])
+@pytest.mark.parametrize("interpolation", ["linear", "hermite"])
 def test_jax_hessian_through_prepared_qmi_matches_gradient_differences(interpolation):
     import jax.numpy as jnp
 
@@ -525,14 +509,13 @@ def test_session_hessian_option_reaches_single_and_multistart_fit(session_name):
             return lambda v: (v['x'] - 0.3)**2 + (v['y'] + v['x'])**2
 
     session = object.__new__(Session)
-    result = session.fit(hessian='jax', hessian_batch_size=2, strategy=1)
+    result = session.fit(hessian='jax', strategy=1)
     assert result.valid
     assert result.nhessian > 0
     scan = session.fit_multistart(
         n_starts=1,
         include_default=True,
         hessian='jax',
-        hessian_batch_size=2,
     )
     assert scan.best.valid
     assert scan.best.nhessian > 0

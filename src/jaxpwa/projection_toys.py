@@ -68,7 +68,7 @@ def _prepare_cp_projection_toy(session, result, size, seed, method, options):
             [_resolve(c.yield_, values) for c in categories], dtype=float
         )
     else:
-        total = session.plus_data.size + session.minus_data.size
+        total = session._total_data_events()
         fraction = (
             float(_resolve(session.signal_fraction, values)) if categories else 1.0
         )

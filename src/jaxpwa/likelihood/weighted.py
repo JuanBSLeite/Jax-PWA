@@ -23,6 +23,11 @@ class WeightedUnbinnedNLL:
     can apply the fixed-weight Godambe score-outer-product covariance with
     ``fit(weights=..., covariance="sandwich")`` or the historical squared-weight
     Hessian correction with ``covariance="sumw2"`` (``"sweight"`` alias).
+
+    A zero-weight event contributes exactly zero, even where ``logpdf`` is
+    ``-inf``. The mask cannot reach inside ``logpdf``'s autodiff, so a gradient
+    stays finite there only if ``logpdf`` itself uses a safe logarithm
+    (``log(where(p > 0, p, 1))``), as Jax-PWA's own signal densities do.
     """
 
     logpdf: LogPDF
@@ -36,6 +41,8 @@ class WeightedUnbinnedNLL:
         weights = jnp.asarray(self.weights)
         if weights.shape != (size,):
             raise ValueError(f"weights must have shape ({size},), got {weights.shape}")
+        if jnp.iscomplexobj(weights):
+            raise ValueError("weights must be real")
         if not bool(jnp.all(jnp.isfinite(weights))):
             raise ValueError("weights must be finite")
         object.__setattr__(self, "weights", weights)
@@ -46,7 +53,20 @@ class WeightedUnbinnedNLL:
             raise ValueError(
                 f"logpdf must return shape {self.weights.shape}, got {values.shape}"
             )
-        return -jnp.sum(self.weights * values)
+        if jnp.iscomplexobj(values):
+            raise ValueError("logpdf must return real values")
+        # A zero-weight event contributes exactly zero, including at a physical
+        # PDF zero where log(p)=-inf. Mask before multiplication to avoid 0*inf.
+        active = self.weights != 0
+        finite = jnp.isfinite(values)
+        valid = jnp.all(finite | ~active)
+        terms = jnp.where(
+            active & finite,
+            self.weights * jnp.where(finite, values, 0.0),
+            0.0,
+        )
+        total = -jnp.sum(terms)
+        return jnp.where(valid & jnp.isfinite(total), total, jnp.inf)
 
 
 def _sandwich_covariance(

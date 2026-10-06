@@ -18,20 +18,15 @@ from jaxpwa.observables import (
     interference_fractions as matrix_interference_fractions,
 )
 
+from . import memory as _memory
 from .components import AmplitudeComponent, coefficient_value
 
 DEFAULT_NORMALIZATION_CHUNK_SIZE = 100_000
-DEFAULT_DYNAMICS_MICROBATCH_PARALLELISM = 1
 
 # Component-function type names already warned about below, so a chunked
 # normalization pass (or a loop of toy fits) does not reprint the same
 # diagnostic once per chunk/toy.
 _MISSING_COMPACTION_WARNED: set[str] = set()
-
-# (order-dependent component names, requested chunk size, microbatch size)
-# combinations already reported, so a multi-toy loop preparing the same model
-# configuration repeatedly does not reprint the same diagnostic per toy.
-_CHUNK_CAP_WARNED: set[tuple[tuple[str, ...], int, int]] = set()
 
 
 @jax.custom_jvp
@@ -116,10 +111,9 @@ def _normalize_component(
 
 def _component_scales(matrix: Array, normalization_mask: Array) -> Array:
     diagonal = jnp.real(jnp.diag(matrix))
-    if bool(jnp.any(diagonal <= 0.0)):
+    if bool(jnp.any(normalization_mask & (diagonal <= 0.0))):
         raise ValueError("Component normalization requires positive diagonal integrals")
-    normalized_scales = 1.0 / jnp.sqrt(diagonal)
-    return jnp.where(normalization_mask, normalized_scales, 1.0)
+    return 1.0 / jnp.sqrt(jnp.where(normalization_mask, diagonal, 1.0))
 
 
 def _component_scales_unchecked(
@@ -127,8 +121,8 @@ def _component_scales_unchecked(
     normalization_mask: Array,
 ) -> tuple[Array, Array]:
     diagonal = jnp.real(jnp.diag(matrix))
-    normalized_scales = 1.0 / jnp.sqrt(diagonal)
-    return jnp.where(normalization_mask, normalized_scales, 1.0), diagonal
+    scales = 1.0 / jnp.sqrt(jnp.where(normalization_mask, diagonal, 1.0))
+    return scales, diagonal
 
 
 def _prepare_component_data(
@@ -248,16 +242,6 @@ def _padded_vector_chunk(
     return piece
 
 
-# A normalization_chunk_size chosen for XLA compilation/geometry-storage
-# amortization (commonly 1e5-1e6) is far larger than the AD reverse-pass can
-# hold live for several floating-dynamics lineshapes at once. Every
-# floating-dynamics chunk is therefore re-split into configurable
-# microbatches, each wrapped in its own `jax.checkpoint`, so peak memory for
-# one macro-chunk stays bounded by one microbatch regardless of the total grid
-# size. DecayModel exposes this default as `dynamics_microbatch_size`.
-DEFAULT_DYNAMICS_MICROBATCH_SIZE = 20_000
-
-
 def _balanced_block_size(point_count: int, maximum_size: int) -> int:
     """Choose an almost-even static block size no larger than ``maximum_size``.
 
@@ -269,79 +253,6 @@ def _balanced_block_size(point_count: int, maximum_size: int) -> int:
     """
     block_count = (point_count + maximum_size - 1) // maximum_size
     return (point_count + block_count - 1) // block_count
-
-
-def _has_order_dependent_preparation(
-    components: Sequence[AmplitudeComponent],
-) -> bool:
-    return any(
-        getattr(
-            getattr(component.function, "lineshape", None),
-            "prepared_mass_is_order_dependent",
-            False,
-        )
-        for component in components
-    )
-
-
-def _repeat_first_padded(array: Array, micro_size: int) -> Array:
-    """Reshape ``(n, ...)`` into ``(n // micro_size, micro_size, ...)``.
-
-    The leading axis is padded to a multiple of ``micro_size`` by repeating
-    the first row, matching ``_padded_mapping_chunk``'s convention of padding
-    with a valid physical point so dynamics are never evaluated at
-    unphysical coordinates.
-    """
-    n = array.shape[0]
-    remainder = n % micro_size
-    if remainder:
-        pad_count = micro_size - remainder
-        filler = jnp.broadcast_to(array[:1], (pad_count,) + array.shape[1:])
-        array = jnp.concatenate((array, filler), axis=0)
-    return array.reshape((-1, micro_size) + array.shape[1:])
-
-
-def _value_padded(array: Array, micro_size: int, padding_value: float) -> Array:
-    """Reshape ``(n, ...)`` into ``(n // micro_size, micro_size, ...)``.
-
-    The leading axis is padded to a multiple of ``micro_size`` with a
-    constant (zero weight, unit efficiency), matching ``_padded_vector_chunk``.
-    """
-    n = array.shape[0]
-    remainder = n % micro_size
-    if remainder:
-        pad_count = micro_size - remainder
-        filler = jnp.full(
-            (pad_count,) + array.shape[1:], padding_value, dtype=array.dtype
-        )
-        array = jnp.concatenate((array, filler), axis=0)
-    return array.reshape((-1, micro_size) + array.shape[1:])
-
-
-def _repeat_first_axis(array: Array, target_size: int) -> Array:
-    """Pad the leading axis by repeating its first entry."""
-    padding = target_size - array.shape[0]
-    if padding <= 0:
-        return array
-    filler = jnp.broadcast_to(array[:1], (padding,) + array.shape[1:])
-    return jnp.concatenate((array, filler), axis=0)
-
-
-def _constant_pad_axis(
-    array: Array,
-    target_size: int,
-    padding_value: float,
-) -> Array:
-    """Pad the leading axis with a constant value."""
-    padding = target_size - array.shape[0]
-    if padding <= 0:
-        return array
-    filler = jnp.full(
-        (padding,) + array.shape[1:],
-        padding_value,
-        dtype=array.dtype,
-    )
-    return jnp.concatenate((array, filler), axis=0)
 
 
 def _compact_normalization_chunk_kernel(
@@ -502,6 +413,7 @@ def _compact_prepare_kernel(
     normalize_components: bool,
     has_efficiency: bool,
     normalization_chunk_size: int = DEFAULT_NORMALIZATION_CHUNK_SIZE,
+    compact_data_kernel=None,
 ):
     """Compose normalization- and data-side coefficient-only programs."""
 
@@ -511,10 +423,12 @@ def _compact_prepare_kernel(
         has_efficiency=has_efficiency,
         chunk_size=normalization_chunk_size,
     )
-    data_kernel = _compact_data_kernel(
-        components,
-        normalize_components=normalize_components,
-    )
+    data_kernel = compact_data_kernel
+    if data_kernel is None:
+        data_kernel = _compact_data_kernel(
+            components,
+            normalize_components=normalize_components,
+        )
 
     def kernel(data, normalization_data, weights, efficiency):
         fixed_matrix, diagonal, scales = normalization_kernel(
@@ -528,6 +442,120 @@ def _compact_prepare_kernel(
     kernel.normalization_kernel = normalization_kernel
     kernel.data_kernel = data_kernel
     return kernel
+
+
+def _validate_chunk_size(value) -> None:
+    if value == "auto":
+        return
+    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+        raise ValueError(
+            "normalization_chunk_size must be a positive integer or 'auto'"
+        )
+
+
+# (points, floating names, has efficiency, normalize flag, budget bucket) keys
+# already reported, so a loop of toys preparing the same configuration does not
+# reprint the same diagnostic.
+_AUTO_CHUNK_REPORTED: set[tuple] = set()
+
+
+def _auto_dynamic_chunk_size(
+    cls,
+    components,
+    data,
+    normalization_data,
+    weights,
+    parameters,
+    efficiency,
+    normalize,
+    fixed_indices,
+    dynamic_indices,
+    memo,
+) -> int:
+    """Largest normalization chunk whose AD memory fits the free device memory.
+
+    The cost per point is measured on a probe: the forward-over-reverse
+    Hessian-vector product of the normalization on the first ``PROBE_POINTS``
+    points, compiled but never run. It is the heaviest program a fit can need
+    (value, gradient and Hessian are all cheaper), and its memory is linear in
+    the number of points. Without device memory statistics, or if the analysis
+    is unavailable, the previous fixed default is used.
+    """
+    n_points = int(weights.size)
+    if n_points <= _memory.SINGLE_BLOCK_POINTS:
+        return n_points
+    budget = _memory.device_memory_budget()
+    if budget is None:
+        return min(DEFAULT_NORMALIZATION_CHUNK_SIZE, n_points)
+    names = tuple(
+        dict.fromkeys(
+            p.name
+            for p in parameters
+            if p.kind is ParameterKind.DYNAMICS and not p.fixed
+        )
+    )
+    key = (
+        n_points,
+        names,
+        efficiency is not None,
+        bool(normalize),
+        budget // 2**26,
+    )
+    if memo is not None and key in memo:
+        return memo[key]
+
+    probe_points = min(_memory.PROBE_POINTS, n_points)
+
+    def head(tree, count):
+        return jax.tree_util.tree_map(lambda array: jnp.asarray(array)[:count], tree)
+
+    probe = cls._prepare_chunked_dynamics(
+        components,
+        head(data, 64),
+        head(normalization_data, probe_points),
+        head(weights, probe_points),
+        parameters,
+        None if efficiency is None else head(efficiency, probe_points),
+        normalize,
+        fixed_indices,
+        dynamic_indices,
+        probe_points,
+        probe_points,
+    )
+    base = {p.name: p.value for p in parameters}
+    x0 = jnp.asarray([base[name] for name in names], dtype=float)
+
+    def normalization(x):
+        values = {**base, **dict(zip(names, x, strict=True))}
+        return jnp.real(probe.normalization(values))
+
+    def hessian_vector_product(x):
+        return jax.jvp(jax.grad(normalization), (x,), (jnp.ones_like(x),))[1]
+
+    temp = _memory.compiled_temp_bytes(hessian_vector_product, x0)
+    if temp is None or temp <= 0:
+        chunk = min(DEFAULT_NORMALIZATION_CHUNK_SIZE, n_points)
+    else:
+        bytes_per_point = temp / probe_points
+        # The prepared blocks are resident for the whole fit, whatever the chunk
+        # size; only what is left of the budget is available to the temporaries.
+        resident = (
+            _memory.tree_nbytes(probe.normalization_chunks) / probe_points * n_points
+        )
+        chunk = _memory.chunk_points_from_budget(
+            max(budget - resident, 0), bytes_per_point, n_points
+        )
+        if key not in _AUTO_CHUNK_REPORTED:
+            _AUTO_CHUNK_REPORTED.add(key)
+            print(
+                "INFO Jax-PWA normalization: automatic chunk size "
+                f"{chunk} of {n_points} points ({bytes_per_point:.0f} B/point "
+                f"for AD; budget {budget / 2**20:.0f} MiB, of which "
+                f"{resident / 2**20:.0f} MiB resident prepared blocks)."
+            )
+    if memo is not None:
+        memo[key] = chunk
+    return chunk
 
 
 @dataclass(frozen=True)
@@ -564,11 +592,7 @@ class PreparedAmplitudeCache:
     dynamic_component_indices: tuple[int, ...] | None = None
     normalization_chunks: tuple | None = None
     normalization_chunk_size: int | None = None
-    dynamics_microbatch_size: int = DEFAULT_DYNAMICS_MICROBATCH_SIZE
-    dynamics_microbatch_parallelism: int = DEFAULT_DYNAMICS_MICROBATCH_PARALLELISM
     effective_normalization_chunk_size: int | None = None
-    effective_dynamics_microbatch_size: int | None = None
-    effective_dynamics_microbatch_parallelism: int | None = None
 
     @property
     def normalization_padding_points(self) -> int:
@@ -578,11 +602,8 @@ class PreparedAmplitudeCache:
         leaves = jax.tree_util.tree_leaves(self.normalization_chunks)
         if not leaves:
             return 0
-        macro_count, macro_size = map(int, leaves[0].shape[:2])
-        micro_size = self.effective_dynamics_microbatch_size or macro_size
-        micro_count = (macro_size + micro_size - 1) // micro_size
-        processed = macro_count * micro_count * micro_size
-        return processed - int(self.normalization_weights.size)
+        chunk_count, chunk_size = map(int, leaves[0].shape[:2])
+        return chunk_count * chunk_size - int(self.normalization_weights.size)
 
     @property
     def normalization_padding_fraction(self) -> float:
@@ -596,6 +617,7 @@ class PreparedAmplitudeCache:
         normalize_components: bool,
         has_efficiency: bool,
         normalization_chunk_size: int = DEFAULT_NORMALIZATION_CHUNK_SIZE,
+        compact_data_kernel=None,
     ):
         """Build the reusable chunked coefficient-only prepare kernel."""
         return _compact_prepare_kernel(
@@ -603,6 +625,7 @@ class PreparedAmplitudeCache:
             normalize_components=bool(normalize_components),
             has_efficiency=bool(has_efficiency),
             normalization_chunk_size=int(normalization_chunk_size),
+            compact_data_kernel=compact_data_kernel,
         )
 
     @staticmethod
@@ -675,9 +698,8 @@ class PreparedAmplitudeCache:
         efficiency_normalization: Array | None = None,
         normalize_components: bool = True,
         compact_prepare_kernel=None,
-        normalization_chunk_size: int = DEFAULT_NORMALIZATION_CHUNK_SIZE,
-        dynamics_microbatch_size: int = DEFAULT_DYNAMICS_MICROBATCH_SIZE,
-        dynamics_microbatch_parallelism: int = DEFAULT_DYNAMICS_MICROBATCH_PARALLELISM,
+        normalization_chunk_size: int | str = "auto",
+        chunk_size_memo: dict | None = None,
     ) -> PreparedAmplitudeCache:
         """Evaluate components and the normalization matrix once, from scratch.
 
@@ -685,28 +707,20 @@ class PreparedAmplitudeCache:
         compact path and never re-evaluate lineshapes afterwards; fits with a
         floating DYNAMICS parameter instead partition fixed vs. dynamic
         components so only the dynamic block is re-evaluated per step.
+
+        ``normalization_chunk_size`` is a positive integer or ``"auto"``.
+        Coefficient-only fits use ``DEFAULT_NORMALIZATION_CHUNK_SIZE`` for
+        ``"auto"`` (their chunks only amortize XLA compilation). With floating
+        dynamics, ``"auto"`` sizes the chunk from the free device memory and
+        the compile-time memory of a probe (see ``amplitude/memory.py``);
+        ``chunk_size_memo`` lets repeated calls skip the probe.
         """
+        _validate_chunk_size(normalization_chunk_size)
         components = tuple(components)
         parameters = tuple(parameters)
         if not components:
             raise ValueError("At least one amplitude component is required")
 
-        if normalization_chunk_size < 1:
-            raise ValueError("normalization_chunk_size must be positive")
-        if (
-            isinstance(dynamics_microbatch_size, bool)
-            or not isinstance(dynamics_microbatch_size, int)
-            or dynamics_microbatch_size < 1
-        ):
-            raise ValueError("dynamics_microbatch_size must be a positive integer")
-        if (
-            isinstance(dynamics_microbatch_parallelism, bool)
-            or not isinstance(dynamics_microbatch_parallelism, int)
-            or dynamics_microbatch_parallelism < 1
-        ):
-            raise ValueError(
-                "dynamics_microbatch_parallelism must be a positive integer"
-            )
         weights = jnp.asarray(normalization_weights)
         if weights.size < 1:
             raise ValueError("normalization sample must contain at least one point")
@@ -727,7 +741,11 @@ class PreparedAmplitudeCache:
                     components,
                     normalize_components=normalize_components,
                     has_efficiency=efficiency_normalization is not None,
-                    normalization_chunk_size=normalization_chunk_size,
+                    normalization_chunk_size=(
+                        DEFAULT_NORMALIZATION_CHUNK_SIZE
+                        if normalization_chunk_size == "auto"
+                        else int(normalization_chunk_size)
+                    ),
                 )
             data_components, fixed_matrix, diagonal, scales = kernel(
                 data,
@@ -735,7 +753,10 @@ class PreparedAmplitudeCache:
                 weights,
                 efficiency,
             )
-            if bool(jnp.any(diagonal <= 0.0)):
+            flags = jnp.asarray(
+                _component_normalization_mask(components, normalize_components)
+            )
+            if bool(jnp.any(flags & (diagonal <= 0.0))):
                 raise ValueError(
                     "Component normalization requires positive diagonal integrals"
                 )
@@ -751,7 +772,6 @@ class PreparedAmplitudeCache:
                 efficiency_normalization=efficiency_normalization,
                 normalize_components=normalize_components,
                 component_scales=scales,
-                dynamics_microbatch_parallelism=dynamics_microbatch_parallelism,
             )
 
         # Floating-dynamics fits (notably QMI) must keep the normalization
@@ -778,52 +798,23 @@ class PreparedAmplitudeCache:
             index for index in range(len(components)) if index not in dynamic_indices
         )
         dynamic_components = tuple(components[index] for index in dynamic_indices)
-        dynamic_chunk_limit = min(int(normalization_chunk_size), int(weights.size))
-        order_dependent_preparation = _has_order_dependent_preparation(
-            dynamic_components
-        )
-        if order_dependent_preparation:
-            # QMI's sort indices belong to the exact block passed to
-            # prepare_mass. Prepare smaller blocks up front rather than
-            # slicing that state later in the inner AD microbatch scan.
-            if int(dynamics_microbatch_size) < int(normalization_chunk_size):
-                order_dependent_names = tuple(
-                    component.name
-                    for component in dynamic_components
-                    if getattr(
-                        getattr(component.function, "lineshape", None),
-                        "prepared_mass_is_order_dependent",
-                        False,
-                    )
-                )
-                cap_key = (
-                    order_dependent_names,
-                    int(normalization_chunk_size),
-                    int(dynamics_microbatch_size),
-                )
-                if cap_key not in _CHUNK_CAP_WARNED:
-                    _CHUNK_CAP_WARNED.add(cap_key)
-                    print(
-                        "INFO Jax-PWA normalization: floating component(s) "
-                        f"{order_dependent_names} use order-dependent prepared state "
-                        "(e.g. QMI's sort order/interval boundaries), so the effective "
-                        "normalization chunk size is capped at "
-                        f"dynamics_microbatch_size={int(dynamics_microbatch_size)} "
-                        "instead of the requested normalization_chunk_size="
-                        f"{int(normalization_chunk_size)}; see "
-                        "'normalization_chunk_size "
-                        "is silently capped by dynamics_microbatch_size...' in "
-                        "docs/performance.md."
-                    )
-            dynamic_chunk_limit = min(
-                dynamic_chunk_limit,
-                dynamics_microbatch_size,
+        if normalization_chunk_size == "auto":
+            dynamic_chunk_limit = _auto_dynamic_chunk_size(
+                cls,
+                components,
+                data,
+                normalization_data,
+                weights,
+                parameters,
+                efficiency_normalization,
+                normalize_components,
+                fixed_indices,
+                dynamic_indices,
+                chunk_size_memo,
             )
-        needs_inner_microbatch = (
-            not order_dependent_preparation
-            and weights.size > dynamics_microbatch_size
-        )
-        if weights.size > dynamic_chunk_limit or needs_inner_microbatch:
+        else:
+            dynamic_chunk_limit = min(int(normalization_chunk_size), int(weights.size))
+        if weights.size > dynamic_chunk_limit:
             dynamic_chunk_size = _balanced_block_size(
                 int(weights.size), dynamic_chunk_limit
             )
@@ -838,9 +829,7 @@ class PreparedAmplitudeCache:
                 fixed_indices,
                 dynamic_indices,
                 dynamic_chunk_size,
-                dynamics_microbatch_size,
-                int(normalization_chunk_size),
-                dynamics_microbatch_parallelism,
+                dynamic_chunk_limit,
             )
 
         fixed_components = tuple(components[index] for index in fixed_indices)
@@ -954,8 +943,6 @@ class PreparedAmplitudeCache:
             component_scales=scales,
             fixed_component_indices=fixed_indices,
             dynamic_component_indices=dynamic_indices,
-            dynamics_microbatch_size=dynamics_microbatch_size,
-            dynamics_microbatch_parallelism=dynamics_microbatch_parallelism,
         )
 
     @classmethod
@@ -971,9 +958,7 @@ class PreparedAmplitudeCache:
         fixed_indices,
         dynamic_indices,
         chunk_size,
-        dynamics_microbatch_size,
         requested_chunk_size,
-        dynamics_microbatch_parallelism,
     ):
         """Prepare geometry independently in each normalization block.
 
@@ -984,23 +969,6 @@ class PreparedAmplitudeCache:
         fixed = tuple(components[i] for i in fixed_indices)
         dynamic = tuple(components[i] for i in dynamic_indices)
         n_points = weights.shape[0]
-        can_microbatch = not _has_order_dependent_preparation(dynamic)
-        effective_microbatch_size = (
-            _balanced_block_size(
-                int(chunk_size), min(int(dynamics_microbatch_size), int(chunk_size))
-            )
-            if can_microbatch
-            else int(chunk_size)
-        )
-        microbatch_count = (
-            (int(chunk_size) + effective_microbatch_size - 1)
-            // effective_microbatch_size
-        )
-        effective_parallelism = (
-            min(int(dynamics_microbatch_parallelism), microbatch_count)
-            if can_microbatch
-            else 1
-        )
         efficiency_array = (
             jnp.ones_like(weights) if efficiency is None else jnp.asarray(efficiency)
         )
@@ -1100,11 +1068,7 @@ class PreparedAmplitudeCache:
             dynamic_component_indices=dynamic_indices,
             normalization_chunks=chunk_arrays,
             normalization_chunk_size=requested_chunk_size,
-            dynamics_microbatch_size=dynamics_microbatch_size,
-            dynamics_microbatch_parallelism=dynamics_microbatch_parallelism,
             effective_normalization_chunk_size=chunk_size,
-            effective_dynamics_microbatch_size=effective_microbatch_size,
-            effective_dynamics_microbatch_parallelism=effective_parallelism,
         )
 
     def _chunked_dynamic_normalization(self, fit_values):
@@ -1115,13 +1079,8 @@ class PreparedAmplitudeCache:
         of small matrix blocks and bare component diagonals. The denominator is
         the original sample size, not the padded size or the number of blocks.
 
-        Each macro-chunk (sized by ``normalization_chunk_size``, chosen for
-        XLA compilation/geometry-storage amortization) is itself re-split into
-        ``dynamics_microbatch_size``-sized microbatches via a nested,
-        checkpointed scan, so the reverse-AD pass through several floating
-        dynamics lineshapes never has to hold more than one microbatch's
-        forward residuals live at a time -- independent of the total grid
-        size.
+        The chunk size (``normalization_chunk_size``) therefore bounds the memory
+        of the reverse-AD pass independently of the total grid size.
         """
         fixed, dynamic = self._component_partitions()
         n_dynamic = len(dynamic)
@@ -1131,19 +1090,9 @@ class PreparedAmplitudeCache:
             self._dynamic_parameter_mapping(self.components[i].name, fit_values)
             for i in dynamic
         )
-        # QMI's prepared data (see `QMI.prepare_mass`) encodes a sort order and
-        # interval boundaries over the *entire* block it was prepared on; a
-        # microbatch reshape would desync those indices from the smaller
-        # sub-blocks. Only microbatch when every dynamic component's lineshape
-        # is free of such block-wide state (the default for anything that
-        # doesn't declare otherwise, e.g. ordinary parametric lineshapes and
-        # KMatrix's per-event response column).
-        can_microbatch = not _has_order_dependent_preparation(
-            tuple(self.components[i] for i in dynamic)
-        )
 
-        def evaluate_microbatch_values(micro_chunk):
-            events, weights, efficiency, fixed_columns = micro_chunk
+        def accumulate(carry, chunk):
+            events, weights, efficiency, fixed_columns = chunk
             values = jnp.stack(
                 [
                     jnp.asarray(self.components[i].function(events, pars), dtype=dtype)
@@ -1165,98 +1114,14 @@ class PreparedAmplitudeCache:
                 )
             else:
                 cross = jnp.zeros((n_dynamic, 0), dtype=dtype)
-            return diagonal, cross, block
-
-        def add_microbatch_values(carry, partial):
-            return tuple(
-                previous + current
-                for previous, current in zip(carry, partial, strict=True)
+            partial = (diagonal, cross, block)
+            return (
+                tuple(
+                    previous + current
+                    for previous, current in zip(carry, partial, strict=True)
+                ),
+                None,
             )
-
-        def evaluate_microbatch(carry, micro_chunk):
-            return add_microbatch_values(
-                carry,
-                evaluate_microbatch_values(micro_chunk),
-            ), None
-
-        def accumulate(carry, chunk):
-            events, weights, efficiency, fixed_columns = chunk
-            if not can_microbatch:
-                return evaluate_microbatch(carry, chunk)
-            micro_size = self.effective_dynamics_microbatch_size
-            if micro_size is None:
-                micro_size = _balanced_block_size(
-                    int(weights.shape[0]),
-                    min(self.dynamics_microbatch_size, int(weights.shape[0])),
-                )
-            micro_events = jax.tree_util.tree_map(
-                lambda a: _repeat_first_padded(a, micro_size),
-                events,
-            )
-            micro_weights = _value_padded(weights, micro_size, 0.0)
-            micro_efficiency = _value_padded(efficiency, micro_size, 1.0)
-            micro_fixed_columns = tuple(
-                _repeat_first_padded(column, micro_size) for column in fixed_columns
-            )
-            parallelism = self.effective_dynamics_microbatch_parallelism or 1
-            if parallelism == 1:
-                carry, _ = jax.lax.scan(
-                    jax.checkpoint(evaluate_microbatch),
-                    carry,
-                    (
-                        micro_events,
-                        micro_weights,
-                        micro_efficiency,
-                        micro_fixed_columns,
-                    ),
-                )
-            else:
-                micro_count = micro_weights.shape[0]
-                group_count = (micro_count + parallelism - 1) // parallelism
-                padded_count = group_count * parallelism
-                grouped_events = jax.tree_util.tree_map(
-                    lambda array: _repeat_first_axis(array, padded_count).reshape(
-                        (group_count, parallelism) + array.shape[1:]
-                    ),
-                    micro_events,
-                )
-                grouped_weights = _constant_pad_axis(
-                    micro_weights,
-                    padded_count,
-                    0.0,
-                ).reshape(
-                    (group_count, parallelism) + micro_weights.shape[1:]
-                )
-                grouped_efficiency = _constant_pad_axis(
-                    micro_efficiency,
-                    padded_count,
-                    1.0,
-                ).reshape(
-                    (group_count, parallelism) + micro_efficiency.shape[1:]
-                )
-                grouped_fixed_columns = tuple(
-                    _repeat_first_axis(column, padded_count).reshape(
-                        (group_count, parallelism) + column.shape[1:]
-                    )
-                    for column in micro_fixed_columns
-                )
-
-                def evaluate_group(carry, group_chunk):
-                    partials = jax.vmap(evaluate_microbatch_values)(group_chunk)
-                    partial = tuple(jnp.sum(part, axis=0) for part in partials)
-                    return add_microbatch_values(carry, partial), None
-
-                carry, _ = jax.lax.scan(
-                    jax.checkpoint(evaluate_group),
-                    carry,
-                    (
-                        grouped_events,
-                        grouped_weights,
-                        grouped_efficiency,
-                        grouped_fixed_columns,
-                    ),
-                )
-            return carry, None
 
         initial = (
             jnp.zeros(n_dynamic, dtype=real_dtype),
@@ -1330,8 +1195,8 @@ class PreparedAmplitudeCache:
         return not self.floating_dynamic_owners
 
     def check_parameters(self, parameters: Sequence[Parameter]) -> None:
-        """Raise if ``parameters`` disagrees with the fixed/floating DYNAMICS
-        split this cache was prepared with.
+        """Raise if ``parameters`` disagrees with the DYNAMICS bindings
+        this cache was prepared with.
 
         ``prepare()`` bakes each DYNAMICS parameter's fixed-vs-floating status
         into the compact-vs-dynamic evaluation path at prepare time: a fixed
@@ -1345,22 +1210,27 @@ class PreparedAmplitudeCache:
         treat it as a flat direction with no error raised. Call this before
         handing a parameter list to ``Minimizer`` whenever it is not the exact
         object passed to ``prepare()``.
+
+        Names, owners, backend aliases, fixed status and fixed values must
+        match for every dynamical parameter, even within an already-floating
+        component. Free starting values, bounds and optimizer steps may differ.
         """
-        incoming = frozenset(
-            p.owner
-            for p in parameters
-            if p.kind is ParameterKind.DYNAMICS and not p.fixed and p.owner is not None
-        )
-        if incoming == self.floating_dynamic_owners:
+        def bindings(items):
+            return {
+                (p.name, p.owner, p.backend_name or p.name,
+                 bool(p.fixed), float(p.value) if p.fixed else None)
+                for p in items if p.kind is ParameterKind.DYNAMICS
+            }
+
+        incoming = bindings(parameters)
+        prepared = bindings(self.parameters)
+        if incoming == prepared:
             return
-        stale_fixed = sorted(incoming - self.floating_dynamic_owners)
-        stale_floating = sorted(self.floating_dynamic_owners - incoming)
+        changed = sorted({binding[0] for binding in incoming ^ prepared})
         raise ValueError(
             "parameters are inconsistent with the dynamics this cache was "
-            "prepared with: components "
-            f"{stale_fixed} are floating in `parameters` but were fixed when "
-            f"this cache was prepared; components {stale_floating} are fixed "
-            "in `parameters` but were floating at prepare time. Rebuild the "
+            f"prepared with: changed dynamics bindings {changed} "
+            "(name, owner, backend alias, fixed status or fixed value). Rebuild the "
             "cache with PreparedAmplitudeCache.prepare(..., parameters=parameters) "
             "or pass the same parameter list used to prepare the cache to Minimizer."
         )
@@ -1716,6 +1586,17 @@ class PreparedAmplitudeCache:
             self.normalization_matrix(fit_values),
         )
 
+    def component_intensities(self, fit_values: Mapping[str, object]) -> Array:
+        """Per-component integrated intensities ``|c_k|^2 M_kk``.
+
+        The numerators of ``fit_fractions``, in the absolute scale of the
+        normalization matrix, so they compare across models sharing an
+        integration convention (e.g. the two charges of a CP fit).
+        """
+        coefficients = self.coefficient_vector(fit_values)
+        matrix = self.normalization_matrix(fit_values)
+        return jnp.real(jnp.conj(coefficients) * jnp.diag(matrix) * coefficients)
+
     def _fraction_jacobian_arrays(self):
         """Dynamic kernel inputs; no fitted-event arrays are needed."""
         return (
@@ -1728,12 +1609,21 @@ class PreparedAmplitudeCache:
             self.normalization_chunks,
         )
 
-    def _build_fraction_jacobian_kernel(self, parameter_names):
-        """Compile reusable sequential VJP rows without retaining sample arrays."""
+    def _build_fraction_jacobian_kernel(
+        self, parameter_names, quantity="fit_fractions",
+    ):
+        """Compile reusable sequential VJP rows without retaining sample arrays.
+
+        ``quantity`` names the per-component cache method differentiated:
+        ``"fit_fractions"`` or ``"component_intensities"``.
+        """
+        if quantity not in ("fit_fractions", "component_intensities"):
+            raise ValueError(
+                "quantity must be 'fit_fractions' or 'component_intensities'"
+            )
         components = self.components
         parameters = self.parameters
         normalize = self.normalize_components
-        dynamics_microbatch_size = self.dynamics_microbatch_size
         fixed, dynamic = self._component_partitions()
         names = tuple(parameter_names)
 
@@ -1755,13 +1645,12 @@ class PreparedAmplitudeCache:
                 fixed_component_indices=fixed,
                 dynamic_component_indices=dynamic,
                 normalization_chunks=chunks,
-                dynamics_microbatch_size=dynamics_microbatch_size,
             )
 
             def fractions(vector):
                 patched = dict(values)
                 patched.update(zip(names, vector, strict=True))
-                return cache.fit_fractions(patched)
+                return getattr(cache, quantity)(patched)
 
             vector = jnp.asarray([values[name] for name in names], dtype=float)
             output, pullback = jax.vjp(fractions, vector)
@@ -1785,7 +1674,6 @@ class PreparedAmplitudeCache:
         components = self.components
         parameters = self.parameters
         normalize = self.normalize_components
-        dynamics_microbatch_size = self.dynamics_microbatch_size
         fixed, dynamic = self._component_partitions()
         names = tuple(parameter_names)
         n = len(components)
@@ -1809,7 +1697,6 @@ class PreparedAmplitudeCache:
                 fixed_component_indices=fixed,
                 dynamic_component_indices=dynamic,
                 normalization_chunks=chunks,
-                dynamics_microbatch_size=dynamics_microbatch_size,
             )
 
             def pairwise(vector):

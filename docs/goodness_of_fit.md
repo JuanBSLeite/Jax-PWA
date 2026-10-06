@@ -23,6 +23,14 @@ The low-level, physics-agnostic building blocks (`chi2_from_histograms`,
 for a custom binning or a workflow the session layer doesn't cover, per the project's
 [low-level/high-level design principle](user_friendly_api.md).
 
+## Local spatial residuals
+
+`kdtree_local_residuals` uses SciPy's spatial tree on host arrays to define a
+reference-neighbour radius for each observed point. It supports `k=1`, including
+when the reference sample has only one point; the returned radii retain one
+entry per observed point even though SciPy squeezes its neighbour axis in that
+case. These local residuals are diagnostics, not independent-bin chi2 terms.
+
 ## Binned Pearson chi2
 
 ```python

@@ -103,6 +103,18 @@ class CPJointNLL:
     (shared ``N_sig`` for both charges, the historical behaviour) or a
     ``YieldAsymmetry`` instance parameterizing independent ``N_plus``/
     ``N_minus`` through a total yield and a yield asymmetry.
+
+    ``plus_weights``/``minus_weights`` (supplied together) turn the objective
+    into the signal-only weighted estimating function
+
+    ``-sum_i w_i log S_+(phi_i) - sum_j w_j log S_-(phi_j)``,
+
+    e.g. for sWeight/COW background subtraction. The signal density keeps
+    the joint charge normalization above, so the charge asymmetry is still
+    measured through ``I_+``/``I_-``: the weighted B+/B- sums play the role
+    of the per-charge event counts. Weighted mode is signal-only (no
+    background, ``signal_fraction`` or extended terms). Events with zero
+    weight do not contribute, even where the signal density vanishes.
     """
 
     plus_cache: PreparedAmplitudeCache
@@ -118,10 +130,14 @@ class CPJointNLL:
     extended: bool = False
     signal_yield: object | None = None
     background_yield: object | None = None
+    plus_weights: Array | None = None
+    minus_weights: Array | None = None
 
     def __post_init__(self) -> None:
         if (self.plus_efficiency is None) != (self.minus_efficiency is None):
             raise ValueError("plus_efficiency and minus_efficiency must be supplied together")
+        if (self.plus_weights is None) != (self.minus_weights is None):
+            raise ValueError("plus_weights and minus_weights must be supplied together")
         legacy_fields = (
             self.plus_background,
             self.minus_background,
@@ -188,6 +204,20 @@ class CPJointNLL:
             for category in self.background_categories:
                 if getattr(category, f"{charge}_values").shape != (size,):
                     raise ValueError(f"{category.name} {charge} background size mismatch")
+            if self.weighted:
+                weights = jnp.asarray(getattr(self, f"{charge}_weights"))
+                if weights.shape != (size,):
+                    raise ValueError(f"{charge}_weights must have shape ({size},), got {weights.shape}")
+                if jnp.iscomplexobj(weights):
+                    raise ValueError(f"{charge}_weights must be real")
+                if not bool(jnp.all(jnp.isfinite(weights))):
+                    raise ValueError(f"{charge}_weights must be finite")
+                object.__setattr__(self, f"{charge}_weights", weights)
+        if self.weighted and (self.has_background or self.extended or self.signal_fraction is not None):
+            raise ValueError(
+                "event weights are incompatible with background, signal_fraction or "
+                "extended terms; a weighted CPJointNLL is signal-only"
+            )
         if self.has_legacy_background:
             for value in (self.plus_background_normalization, self.minus_background_normalization):
                 array = jnp.asarray(value)
@@ -226,6 +256,11 @@ class CPJointNLL:
         return valid
 
     @property
+    def weighted(self) -> bool:
+        """Whether per-event plus_weights/minus_weights are set."""
+        return self.plus_weights is not None
+
+    @property
     def has_legacy_background(self) -> bool:
         """Whether the legacy plus_background/minus_background arguments are set."""
         return self.plus_background is not None
@@ -240,6 +275,7 @@ class CPJointNLL:
         intensity_minus, integral_minus = self.minus_cache.evaluate(parameters)
         if self.plus_efficiency is not None:
             intensity_plus = jnp.asarray(self.plus_efficiency) * intensity_plus
+        if self.minus_efficiency is not None:
             intensity_minus = jnp.asarray(self.minus_efficiency) * intensity_minus
         total_integral = integral_plus + integral_minus
         valid = (jnp.isfinite(integral_plus) & jnp.isfinite(integral_minus)
@@ -256,6 +292,20 @@ class CPJointNLL:
     def _background_densities(self) -> tuple[Array, Array]:
         """Backward-compatible single-background density helper."""
         return self._legacy_background_densities()
+
+    def signal_log_densities(self, parameters: Parameters) -> tuple[Array, Array]:
+        """Per-event ``(log S_+, log S_-)`` of the jointly normalized signal.
+
+        ``-inf`` where the density is zero or the joint normalization is
+        invalid; gradients stay finite (safe logarithm arguments).
+        """
+        signal_plus, signal_minus, _, _ = self._signal_densities(parameters)
+
+        def safe_log(values):
+            valid = jnp.isfinite(values) & (values > 0)
+            return jnp.where(valid, jnp.log(jnp.where(valid, values, 1.0)), -jnp.inf)
+
+        return safe_log(signal_plus), safe_log(signal_minus)
 
     def background_weights(self, parameters: Parameters) -> Array:
         """Resolve each non-extended background category's relative fraction.
@@ -344,8 +394,22 @@ class CPJointNLL:
             total = total + jnp.asarray(_resolve(self.background_yield, parameters))
         return total
 
+    def _weighted_nll(self, parameters: Parameters) -> Array:
+        total = jnp.asarray(0.0, dtype=self.plus_cache.data_components.real.dtype)
+        valid = jnp.asarray(True)
+        log_densities = self.signal_log_densities(parameters)
+        for weights, log_density in zip((self.plus_weights, self.minus_weights), log_densities, strict=True):
+            active = weights != 0
+            finite = jnp.isfinite(log_density)
+            valid = valid & jnp.all(finite | ~active)
+            total = total - jnp.sum(jnp.where(active & finite, weights * jnp.where(finite, log_density, 0.0), 0.0))
+        return jnp.where(valid & jnp.isfinite(total), total, jnp.inf)
+
     def __call__(self, parameters: Parameters) -> Array:
         """Return +inf outside the physical domain, including during JIT fits."""
+        if self.weighted:
+            return self._weighted_nll(parameters)
+
         def evaluate(_):
             plus, minus = self.densities(parameters)
             valid = (jnp.all(jnp.isfinite(plus) & (plus > 0))

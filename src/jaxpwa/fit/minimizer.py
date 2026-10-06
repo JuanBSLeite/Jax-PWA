@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 import weakref
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -89,9 +90,7 @@ class Minimizer:
     ``hessian="jax"`` supplies automatic second derivatives to Minuit, including
     its internal HESSE calls during MIGRAD. The default ``"numerical"`` keeps
     Minuit's finite differences. JAX Hessians compile lazily. Floating-dynamics
-    fits evaluate ``hessian_batch_size`` Hessian-vector products together;
-    its default of 1 keeps the bounded-memory sequential behavior. Larger
-    batches can improve throughput on GPUs with more VRAM. Second-order
+    fits evaluate the Hessian one Hessian-vector product at a time. Second-order
     differentiability is required.
     """
 
@@ -104,7 +103,6 @@ class Minimizer:
         tolerance: float = 1e-4,
         verbose: int = 0,
         hessian: str = "numerical",
-        hessian_batch_size: int = 1,
     ):
         if errordef <= 0:
             raise ValueError("errordef must be positive")
@@ -114,19 +112,12 @@ class Minimizer:
             raise ValueError("verbose must be a non-negative integer")
         if hessian not in ("numerical", "jax"):
             raise ValueError("hessian must be 'numerical' or 'jax'")
-        if (
-            isinstance(hessian_batch_size, bool)
-            or not isinstance(hessian_batch_size, int)
-            or hessian_batch_size < 1
-        ):
-            raise ValueError("hessian_batch_size must be a positive integer")
         self.objective = objective
         self.parameters = tuple(parameters)
         self.errordef = float(errordef)
         self.tolerance = float(tolerance)
         self.verbose = int(verbose)
         self.hessian = hessian
-        self.hessian_batch_size = hessian_batch_size
         self._backend_cache = None
 
     def _log(self, message: str) -> None:
@@ -148,6 +139,7 @@ class Minimizer:
                 parameter.name,
                 bool(parameter.fixed),
                 float(parameter.value) if parameter.fixed else None,
+                parameter.kind is ParameterKind.DYNAMICS and not parameter.fixed,
             )
             for parameter in self.parameters
         )
@@ -156,7 +148,6 @@ class Minimizer:
         key = (
             id(self.objective),
             self._backend_signature(),
-            self.hessian_batch_size,
         )
         cached = _SHARED_BACKENDS.get(key)
         if cached is None:
@@ -250,8 +241,8 @@ class Minimizer:
         )
         gradient_function = jax.grad(vector_objective)
         if has_floating_dynamics:
-            # The checkpoint closes a recomputation boundary that the inner
-            # chunk scans do not extend to second-order differentiation.
+            # Recompute the gradient's forward pass in the second-order pass
+            # instead of storing its residuals for the whole normalization grid.
             gradient_function = jax.checkpoint(gradient_function)
 
         @jax.jit
@@ -268,16 +259,6 @@ class Minimizer:
             )[1]
 
         @jax.jit
-        def hessian_vector_product_batch(vector, tangents):
-            return jax.vmap(
-                lambda tangent: jax.jvp(
-                    gradient_function,
-                    (vector,),
-                    (tangent,),
-                )[1]
-            )(tangents)
-
-        @jax.jit
         def hessian_program(vector):
             # Coefficient-only objectives are small enough to reuse one
             # linearization and evaluate every column inside one executable.
@@ -289,12 +270,6 @@ class Minimizer:
 
         hessian_point = None
         hessian_value = None
-        # Snapshot now: this closure may later be reused by another Minimizer
-        # instance sharing the same backend (see `_shared_backend`), and must
-        # not follow whatever `self.hessian_batch_size` is mutated to on the
-        # instance that happened to compile it.
-        configured_hessian_batch_size = self.hessian_batch_size
-
         @jax.jit
         def diagonal_program(vector):
             def diagonal_entry(index):
@@ -307,11 +282,7 @@ class Minimizer:
             # Keep the directional derivatives inside one execution and
             # retain only H_ii. In particular, do not build a full Hessian
             # or reuse a grid-wide linearization for floating dynamics.
-            indices = jnp.arange(len(names))
-            batch_size = min(configured_hessian_batch_size, len(names))
-            if batch_size == 1:
-                return jax.lax.map(diagonal_entry, indices)
-            return jax.lax.map(diagonal_entry, indices, batch_size=batch_size)
+            return jax.lax.map(diagonal_entry, jnp.arange(len(names)))
 
         diagonal_point = None
         diagonal_value = None
@@ -335,36 +306,10 @@ class Minimizer:
             if hessian_point is None or not np.array_equal(point, hessian_point):
                 device_point = jnp.asarray(point)
                 if has_floating_dynamics:
-                    # Synchronize each configured HVP batch before launching
-                    # the next, so temporary buffers cannot overlap across
-                    # batches. The default batch size of one is the validated
-                    # bounded-memory path for a 4 GiB GPU.
-                    basis = np.eye(len(names), dtype=point.dtype)
-                    batch_size = min(configured_hessian_batch_size, len(names))
+                    # Synchronize each product before launching the next, so
+                    # temporary buffers cannot overlap across columns.
                     columns = []
-                    full_stop = len(names) - len(names) % batch_size
-                    for start in range(0, full_stop, batch_size):
-                        stop = start + batch_size
-                        tangents = basis[start:stop]
-                        if batch_size == 1:
-                            products = jax.device_get(
-                                hessian_vector_product(
-                                    device_point,
-                                    jnp.asarray(tangents[0], dtype=device_point.dtype),
-                                )
-                            )[None, :]
-                        else:
-                            products = jax.device_get(
-                                hessian_vector_product_batch(
-                                    device_point,
-                                    jnp.asarray(tangents, dtype=device_point.dtype),
-                                )
-                            )
-                        columns.extend(np.asarray(products, dtype=float))
-                    # A partial vector batch would either execute padded HVPs
-                    # or compile another vmap width. Reuse the scalar program
-                    # for the few remaining basis vectors instead.
-                    for tangent in basis[full_stop:]:
+                    for tangent in np.eye(len(names), dtype=point.dtype):
                         product = jax.device_get(
                             hessian_vector_product(
                                 device_point,
@@ -517,7 +462,7 @@ class Minimizer:
         """Exact objective Hessian from the memory-aware JAX backend.
 
         Returns ``(names, hessian)`` in free-parameter order. Floating-dynamics
-        fits keep the same sequential/batched HVP implementation used by
+        fits keep the same sequential HVP implementation used by
         ``hessian="jax"``, so callers such as the sWeight covariance correction
         do not need to materialize an event-by-parameter Jacobian.
         """
@@ -616,18 +561,24 @@ class Minimizer:
 
         best_fval = float("inf")
         best_values = {name: float(minuit.values[name]) for name in names}
+        best_result = None
 
         def stage(label, method, **kwargs):
-            nonlocal best_fval, best_values
+            nonlocal best_fval, best_values, best_result
             self._log(f"{label} started")
             started = perf_counter()
             nfcn, ngrad = minuit.nfcn, minuit.ngrad
             nhessian = minuit.nhessian
             method(ncall=ncall, **kwargs)
             nonlocal_best = float(minuit.fval)
-            if np.isfinite(nonlocal_best) and nonlocal_best < best_fval:
+            if np.isfinite(nonlocal_best) and nonlocal_best <= best_fval:
                 best_fval = nonlocal_best
                 best_values = {name: float(minuit.values[name]) for name in names}
+                # Retain values, fval, validity and covariance together. Merely
+                # assigning minuit.values leaves its previous FMin in place
+                # until another minimization/HESSE recomputes it. The callbacks
+                # are functions, so deepcopy shares their compiled JAX closures.
+                best_result = deepcopy(minuit)
             self._log(
                 f"{label} finished in {perf_counter() - started:.3f} s: "
                 f"nfcn=+{minuit.nfcn - nfcn}, ngrad=+{minuit.ngrad - ngrad}, "
@@ -663,6 +614,12 @@ class Minimizer:
             if hesse:
                 stage("HESSE (restored)", minuit.hesse)
         polish_if_invalid()
+        if best_result is not None and (
+            not np.isfinite(float(minuit.fval)) or float(minuit.fval) > best_fval
+        ):
+            self._log("returning the best Minuit stage because the final "
+                      "continuation worsened the NLL or became non-finite")
+            return best_result
         return minuit
 
     def fit(
@@ -685,7 +642,9 @@ class Minimizer:
         approximate limit while completing an iteration. ``method="nesterov"``
         returns the fast Nesterov endpoint; ``method="nesterov-minuit"`` uses
         it as the starting point for the ordinary strategy-1/2 Minuit fit.
-        Invalid or worsened Minuit continuations are rejected.
+        Non-finite or worsened Minuit continuations are rejected in favor of
+        the Nesterov endpoint; an invalid continuation that does not worsen
+        the NLL is returned with its invalid status.
         """
         ncall = self._validate_ncall(ncall)
         strategy = self._validate_strategy(strategy)
@@ -726,11 +685,19 @@ class Minimizer:
             ncall=ncall,
         )
         if (prefit is not None and
-                (not bool(result.valid) or not np.isfinite(float(result.fval)) or
+                (not np.isfinite(float(result.fval)) or
                  float(result.fval) > float(prefit.fval))):
-            self._log("MIGRAD produced an invalid or worsened continuation; "
+            self._log("MIGRAD produced a non-finite or worsened continuation; "
                       "returning the Nesterov endpoint")
             return prefit
+        if prefit is not None and not bool(result.valid):
+            # An invalid MIGRAD (call limit, EDM above target, failed error
+            # matrix) that still lowered the NLL is a better point than the
+            # Nesterov endpoint, which carries no EDM or covariance check of
+            # its own. Return it with its invalid status, as method="minuit"
+            # does, instead of discarding the improvement.
+            self._log("MIGRAD continuation is invalid but did not worsen the "
+                      "Nesterov NLL; returning it with its invalid status")
         self._log(f"single fit finished: {self._summary(result)}")
         return result
 

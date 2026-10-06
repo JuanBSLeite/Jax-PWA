@@ -528,19 +528,18 @@ class TimeDependentFitSession:
 
     def minimizer(
         self, *, tolerance: float = 1e-4, verbose: int = 0,
-        hessian: str = "numerical", hessian_batch_size: int = 1,
+        hessian: str = "numerical",
     ) -> Minimizer:
         """Build a Minimizer over the (optionally constrained) objective."""
         return Minimizer(
             self.objective, self.parameters,
             tolerance=tolerance, verbose=verbose, hessian=hessian,
-            hessian_batch_size=hessian_batch_size,
         )
 
     def fit(
         self, start_values=None, *, simplex: bool = False, ncall=None,
         strategy: int = 2, hesse: bool = True, tolerance: float = 1e-4,
-        verbose: int = 0, hessian: str = "numerical", hessian_batch_size: int = 1,
+        verbose: int = 0, hessian: str = "numerical",
         method: str = "minuit", nesterov_max_iter: int = 1000,
         nesterov_gtol: float = 1e-4, update_model: bool = False,
     ):
@@ -556,7 +555,6 @@ class TimeDependentFitSession:
         """
         result = self.minimizer(
             tolerance=tolerance, verbose=verbose, hessian=hessian,
-            hessian_batch_size=hessian_batch_size,
         ).fit(
             start_values=start_values, simplex=simplex, ncall=ncall,
             strategy=strategy, hesse=hesse, method=method,
@@ -573,12 +571,11 @@ class TimeDependentFitSession:
     def fit_multistart(
         self, n_starts: int = 20, *, seed=None, include_default: bool = False,
         simplex: bool = False, strategy: int = 1, tolerance: float = 1e-4,
-        verbose: int = 0, hessian: str = "numerical", hessian_batch_size: int = 1,
+        verbose: int = 0, hessian: str = "numerical",
     ):
         """Fit from multiple random starts, keep the best fit."""
         return self.minimizer(
             tolerance=tolerance, verbose=verbose, hessian=hessian,
-            hessian_batch_size=hessian_batch_size,
         ).fit_multistart(
             n_starts=n_starts, seed=seed, include_default=include_default,
             simplex=simplex, strategy=strategy,

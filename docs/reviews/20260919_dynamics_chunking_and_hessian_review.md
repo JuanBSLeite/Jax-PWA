@@ -1,5 +1,12 @@
 # Dynamics microbatching and bounded-memory Hessian review — 2026-09-19
 
+> **Partly superseded (2026-10-02).** `dynamics_microbatch_size`,
+> `dynamics_microbatch_parallelism` and `hessian_batch_size` were removed. Only
+> `normalization_chunk_size` survives, now also accepting `"auto"` (memory-aware
+> sizing, see [performance.md](../performance.md)). This write-up is kept as the
+> historical record of the removed code; its microbatch tests and
+> `benchmark_dynamics_chunking_sweep.py` no longer exist.
+
 Adversarial review of commit `a77f130` ("improve chucks for free dynamics"), which added the
 `dynamics_microbatch_size` AD microbatching path in `PreparedAmplitudeCache` (see "AD
 microbatching for floating-dynamics normalization on constrained GPUs" and "Bounded-memory

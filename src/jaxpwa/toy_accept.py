@@ -215,8 +215,7 @@ def _pilot_local_envelopes(
     """Build strictly positive local envelopes from a uniform pilot sample."""
 
     cells = np.asarray(
-        jax.device_get(_phase_space_cells(model, pilot, grid_shape)),
-        dtype=np.int32,
+        jax.device_get(_phase_space_cells(model, pilot, grid_shape)), dtype=np.int32
     )
     scores = np.asarray(jax.device_get(pilot_scores), dtype=float)
     n_cells = int(grid_shape[0] * grid_shape[1])

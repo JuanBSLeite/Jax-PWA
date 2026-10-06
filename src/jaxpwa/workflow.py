@@ -21,6 +21,7 @@ from jaxpwa.background import BackgroundCategory
 from jaxpwa.constraints import ConstrainedNLL
 from jaxpwa.efficiency import UnityEfficiency
 from jaxpwa.fit import Minimizer, Parameter
+from jaxpwa.fit.nesterov import NesterovResult
 from jaxpwa.goodness_of_fit import (
     BinnedChi2Result,
     PointToPointResult,
@@ -157,6 +158,10 @@ def _install_minuit_covariance(result, names: Sequence[str], covariance) -> None
     scale = max(1.0, float(np.max(np.abs(diagonal), initial=0.0)))
     if np.any(diagonal < -1e-10 * scale):
         raise ValueError("corrected covariance has a negative diagonal element")
+    eigenvalues = np.linalg.eigvalsh(values)
+    eigenvalue_scale = max(1.0, float(np.max(np.abs(eigenvalues), initial=0.0)))
+    if np.any(eigenvalues < -1e-10 * eigenvalue_scale):
+        raise ValueError("corrected covariance must be positive semidefinite")
 
     matrix = Matrix(names)
     matrix[:] = values
@@ -165,6 +170,148 @@ def _install_minuit_covariance(result, names: Sequence[str], covariance) -> None
     # corrected covariance transparently.
     result._covariance = matrix
     result.errors = np.sqrt(np.clip(diagonal, 0.0, None))
+
+
+_COVARIANCE_MODES = ("minuit", "sweight", "sumw2", "sandwich")
+
+
+def _square_weights(weights):
+    """Element-wise square of one weight array or of a (plus, minus) pair."""
+    if isinstance(weights, tuple):
+        return tuple(jnp.square(jnp.asarray(w)) for w in weights)
+    return jnp.square(jnp.asarray(weights))
+
+
+def _fit_with_optional_weights(
+    *,
+    unweighted_minimizer,
+    weighted_objective,
+    event_weighted_objective,
+    score_outer_objective,
+    parameters,
+    weights,
+    covariance: str,
+    start_values,
+    simplex: bool,
+    ncall,
+    strategy: int,
+    hesse: bool,
+    tolerance: float,
+    verbose: int,
+    hessian: str,
+    method: str,
+    nesterov_max_iter: int,
+    nesterov_gtol: float,
+):
+    """Shared fit driver of ``FitSession.fit`` and ``CPFitSession.fit``.
+
+    ``unweighted_minimizer()`` builds the ordinary minimizer used when
+    ``weights is None``. ``weighted_objective(weights)`` returns the
+    signal-only objective ``-sum_i w_i log p_i`` plus any constraints,
+    ``event_weighted_objective(weights)`` returns the event term alone, and
+    ``score_outer_objective(weights, fitted)`` a scalar whose Hessian at
+    ``fitted`` is ``sum_i w_i^2 s_i s_i^T``. With
+    ``covariance="sandwich"|"sumw2"|"sweight"`` the result's covariance and
+    errors are replaced by the corrected weighted covariance.
+    """
+    if covariance not in _COVARIANCE_MODES:
+        raise ValueError(
+            "covariance must be 'minuit', 'sweight', 'sumw2', or 'sandwich'"
+        )
+    corrected_weight_covariance = covariance in ("sweight", "sumw2", "sandwich")
+    if corrected_weight_covariance and weights is None:
+        raise ValueError(f"covariance={covariance!r} requires event weights")
+    if corrected_weight_covariance and method == "nesterov":
+        raise ValueError(
+            f"covariance={covariance!r} requires a Minuit-refined fit result"
+        )
+
+    if weights is None:
+        minimizer = unweighted_minimizer()
+    else:
+        # A signed-weight likelihood is not guaranteed to have positive
+        # curvature away from the minimum. Supplying its exact Hessian to
+        # MIGRAD can therefore make Minuit's seed/error matrix indefinite
+        # even when the objective and gradient are perfectly finite.
+        #
+        # In corrected weighted covariance modes, hessian="jax" keeps the
+        # ordinary JAX gradient during minimization but not the Hessian.
+        # Minuit estimates its search curvature numerically; the exact
+        # memory-aware JAX matrices are evaluated only at the fitted point.
+        # The low-level Minimizer and ordinary covariance="minuit" fits
+        # retain the historical direct-to-MIGRAD JAX Hessian behavior.
+        minimization_hessian = (
+            "numerical"
+            if corrected_weight_covariance and hessian == "jax"
+            else hessian
+        )
+        minimizer = Minimizer(
+            weighted_objective(weights),
+            parameters,
+            tolerance=tolerance,
+            verbose=verbose,
+            hessian=minimization_hessian,
+        )
+
+    result = minimizer.fit(
+        start_values=start_values,
+        simplex=simplex,
+        ncall=ncall,
+        strategy=strategy,
+        hesse=hesse,
+        method=method,
+        nesterov_max_iter=nesterov_max_iter,
+        nesterov_gtol=nesterov_gtol,
+    )
+
+    if not corrected_weight_covariance:
+        return result
+    if isinstance(result, NesterovResult):
+        warnings.warn(
+            "The Minuit continuation of the Nesterov prefit was rejected "
+            "(non-finite or higher NLL), so the Nesterov endpoint is returned; "
+            "skipping corrected covariance. It has no EDM or covariance check; "
+            "do not report uncertainties from it.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return result
+    if not bool(result.valid) or not np.isfinite(float(result.fval)):
+        warnings.warn(
+            "Weighted fit did not converge; skipping corrected covariance. "
+            "Inspect the objective and gradients before reporting uncertainties. "
+            "The returned result retains its invalid fit status and any "
+            "uncorrected optimizer covariance.",
+            RuntimeWarning,
+            stacklevel=3,
+        )
+        return result
+
+    fitted = {name: float(result.values[name]) for name in result.parameters}
+    names, weighted_hessian = minimizer.jax_hessian(fitted)
+    if covariance in ("sweight", "sumw2"):
+        # Fixed constraints contribute to the sensitivity matrix above, but
+        # are not event fluctuations and do not belong in H_w2.
+        second_objective = event_weighted_objective(_square_weights(weights))
+        label = "weighted and squared-weight Hessians"
+    else:
+        second_objective = score_outer_objective(weights, fitted)
+        label = "weighted Hessian and score-outer matrix"
+    second_names, variability = Minimizer(
+        second_objective,
+        parameters,
+        tolerance=tolerance,
+        verbose=verbose,
+        hessian="jax",
+    ).jax_hessian(fitted)
+    if second_names != names:
+        raise RuntimeError(f"{label} use different parameters")
+    if covariance in ("sweight", "sumw2"):
+        corrected = sweight_covariance_from_hessians(weighted_hessian, variability)
+    else:
+        corrected = sandwich_covariance_from_score_outer(weighted_hessian, variability)
+    _install_minuit_covariance(result, names, corrected)
+    return result
 
 
 @dataclass(frozen=True)
@@ -471,8 +618,8 @@ class FitSession:
             nll = ConstrainedNLL(nll, *self.constraints)
         return nll
 
-    def _weighted_objective(self, weights):
-        """Signal-only weighted NLL used for sWeight/sPlot Dalitz fits."""
+    def _weighted_nll(self, weights):
+        """Signal-only event term used for sWeight/sPlot Dalitz fits."""
 
         if (
             self.backgrounds
@@ -488,11 +635,15 @@ class FitSession:
         # Materialize cached properties before JAX traces the weighted objective.
         _ = self.signal_cache
         _ = self.acceptance_data
-        nll: object = WeightedUnbinnedNLL(
+        return WeightedUnbinnedNLL(
             self._cached_signal_logpdf,
             self.data.as_dict(),
             weights,
         )
+
+    def _weighted_objective(self, weights):
+        """Weighted signal event term plus this session's constraints."""
+        nll: object = self._weighted_nll(weights)
         if self.constraints:
             nll = ConstrainedNLL(nll, *self.constraints)
         return nll
@@ -522,9 +673,12 @@ class FitSession:
         )
 
         def objective(parameters):
-            delta = (
-                jnp.asarray(self._cached_signal_logpdf(data, parameters))
-                - reference
+            current = jnp.asarray(self._cached_signal_logpdf(data, parameters))
+            active = weights_array != 0
+            delta = jnp.where(
+                active,
+                current - jnp.where(active, reference, 0.0),
+                0.0,
             )
             return 0.5 * jnp.sum(jnp.square(weights_array) * jnp.square(delta))
 
@@ -558,7 +712,6 @@ class FitSession:
         tolerance: float = 1e-4,
         verbose: int = 0,
         hessian: str = "numerical",
-        hessian_batch_size: int = 1,
     ) -> Minimizer:
         """Build a `Minimizer` over `self.objective` and `self.parameters`."""
         return Minimizer(
@@ -567,7 +720,6 @@ class FitSession:
             tolerance=tolerance,
             verbose=verbose,
             hessian=hessian,
-            hessian_batch_size=hessian_batch_size,
         )
 
     def fit(
@@ -583,7 +735,6 @@ class FitSession:
         tolerance: float = 1e-4,
         verbose: int = 0,
         hessian: str = "numerical",
-        hessian_batch_size: int = 1,
         method: str = "minuit",
         nesterov_max_iter: int = 1000,
         nesterov_gtol: float = 1e-4,
@@ -621,122 +772,30 @@ class FitSession:
         -- the return value then becomes ``(result, updated_model)`` instead
         of plain ``result``.
         """
-        covariance_modes = ("minuit", "sweight", "sumw2", "sandwich")
-        if covariance not in covariance_modes:
-            raise ValueError(
-                "covariance must be 'minuit', 'sweight', 'sumw2', or 'sandwich'"
-            )
-        corrected_weight_covariance = covariance in ("sweight", "sumw2", "sandwich")
-        if corrected_weight_covariance and weights is None:
-            raise ValueError(f"covariance={covariance!r} requires event weights")
-        if corrected_weight_covariance and method == "nesterov":
-            raise ValueError(
-                f"covariance={covariance!r} requires a Minuit-refined fit result"
-            )
-
-        if weights is None:
-            minimizer = self.minimizer(
+        result = _fit_with_optional_weights(
+            unweighted_minimizer=lambda: self.minimizer(
                 tolerance=tolerance,
                 verbose=verbose,
                 hessian=hessian,
-                hessian_batch_size=hessian_batch_size,
-            )
-        else:
-            weighted_objective = self._weighted_objective(weights)
-
-            # A signed-weight likelihood is not guaranteed to have positive
-            # curvature away from the minimum. Supplying its exact Hessian to
-            # MIGRAD can therefore make Minuit's seed/error matrix indefinite
-            # even when the objective and gradient are perfectly finite.
-            #
-            # In corrected weighted covariance modes, hessian="jax" keeps the
-            # ordinary JAX gradient during minimization but not the Hessian.
-            # Minuit estimates its search curvature numerically; the exact
-            # memory-aware JAX matrices are evaluated only at the fitted point.
-            # The low-level Minimizer and ordinary covariance="minuit" fits
-            # retain the historical direct-to-MIGRAD JAX Hessian behavior.
-            minimization_hessian = (
-                "numerical"
-                if corrected_weight_covariance and hessian == "jax"
-                else hessian
-            )
-            minimizer = Minimizer(
-                weighted_objective,
-                self.parameters,
-                tolerance=tolerance,
-                verbose=verbose,
-                hessian=minimization_hessian,
-                hessian_batch_size=hessian_batch_size,
-            )
-
-        result = minimizer.fit(
+            ),
+            weighted_objective=self._weighted_objective,
+            event_weighted_objective=self._weighted_nll,
+            score_outer_objective=self._score_outer_objective,
+            parameters=self.parameters,
+            weights=weights,
+            covariance=covariance,
             start_values=start_values,
             simplex=simplex,
             ncall=ncall,
             strategy=strategy,
             hesse=hesse,
+            tolerance=tolerance,
+            verbose=verbose,
+            hessian=hessian,
             method=method,
             nesterov_max_iter=nesterov_max_iter,
             nesterov_gtol=nesterov_gtol,
         )
-
-        if corrected_weight_covariance and (
-            not bool(result.valid) or not np.isfinite(float(result.fval))
-        ):
-            warnings.warn(
-                "Weighted fit did not converge; skipping corrected covariance. "
-                "Inspect the objective and gradients before reporting uncertainties. "
-                "The returned result retains its invalid fit status and any "
-                "uncorrected optimizer covariance.",
-                RuntimeWarning,
-                stacklevel=2,
-            )
-        elif corrected_weight_covariance:
-            fitted = {
-                name: float(result.values[name])
-                for name in result.parameters
-            }
-            names, weighted_hessian = minimizer.jax_hessian(fitted)
-
-            if covariance in ("sweight", "sumw2"):
-                squared_minimizer = Minimizer(
-                    self._weighted_objective(jnp.square(jnp.asarray(weights))),
-                    self.parameters,
-                    tolerance=tolerance,
-                    verbose=verbose,
-                    hessian="jax",
-                    hessian_batch_size=hessian_batch_size,
-                )
-                second_names, variability = squared_minimizer.jax_hessian(fitted)
-                if second_names != names:
-                    raise RuntimeError(
-                        "weighted and squared-weight Hessians use different parameters"
-                    )
-                corrected = sweight_covariance_from_hessians(
-                    weighted_hessian,
-                    variability,
-                )
-            else:
-                score_outer_minimizer = Minimizer(
-                    self._score_outer_objective(weights, fitted),
-                    self.parameters,
-                    tolerance=tolerance,
-                    verbose=verbose,
-                    hessian="jax",
-                    hessian_batch_size=hessian_batch_size,
-                )
-                second_names, variability = score_outer_minimizer.jax_hessian(fitted)
-                if second_names != names:
-                    raise RuntimeError(
-                        "weighted Hessian and score-outer matrix use different "
-                        "parameters"
-                    )
-                corrected = sandwich_covariance_from_score_outer(
-                    weighted_hessian,
-                    variability,
-                )
-
-            _install_minuit_covariance(result, names, corrected)
 
         if not update_model:
             return result
@@ -753,14 +812,12 @@ class FitSession:
         tolerance: float = 1e-4,
         verbose: int = 0,
         hessian: str = "numerical",
-        hessian_batch_size: int = 1,
     ):
         """Fit from `n_starts` randomized initial values, keeping the best result."""
         return self.minimizer(
             tolerance=tolerance,
             verbose=verbose,
             hessian=hessian,
-            hessian_batch_size=hessian_batch_size,
         ).fit_multistart(
             n_starts=n_starts,
             seed=seed,

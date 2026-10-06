@@ -12,12 +12,13 @@ Square-Dalitz mass pair.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
 import math
+from dataclasses import dataclass
 
 import jax.numpy as jnp
 import numpy as np
 
+from jaxpwa._quadrature import legendre_rule
 from jaxpwa.kinematics import (
     PhaseSpaceSample,
     square_dalitz_jacobian,
@@ -170,7 +171,7 @@ class AdaptiveSquareDalitzGrid:
         return self.mprime_node_count * self.resolution
 
     def sample(self) -> PhaseSpaceSample:
-        x, w = np.polynomial.legendre.leggauss(self.cell_order)
+        x, w = legendre_rule(self.cell_order)
 
         mp_parts: list[np.ndarray] = []
         mp_weight_parts: list[np.ndarray] = []
@@ -181,7 +182,7 @@ class AdaptiveSquareDalitzGrid:
         mprime_axis = np.concatenate(mp_parts)
         mprime_weights = np.concatenate(mp_weight_parts)
 
-        theta_x, theta_w = np.polynomial.legendre.leggauss(self.resolution)
+        theta_x, theta_w = legendre_rule(self.resolution)
         theta_axis = 0.5 * (theta_x + 1.0)
         theta_weights = 0.5 * theta_w
 

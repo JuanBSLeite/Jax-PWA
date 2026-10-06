@@ -107,18 +107,20 @@ def test_model_round_trip_preserves_particle_backed_resonance_identity():
     assert resonance.spin == 1
 
 
-def test_model_round_trip_preserves_dynamic_microbatch_tuning():
+def test_model_round_trip_preserves_normalization_chunk_size():
     spec = model_to_spec(_floating_rho_model())
-    spec["dynamics_microbatch_size"] = 12_345
-    restored = model_from_spec(spec)
-    assert restored.dynamics_microbatch_size == 12_345
+    assert spec["normalization_chunk_size"] == "auto"
+    spec["normalization_chunk_size"] = 12_345
+    assert model_from_spec(spec).normalization_chunk_size == 12_345
 
 
-def test_old_model_spec_uses_default_dynamic_microbatch_size():
+def test_old_model_spec_without_chunk_size_uses_auto_and_ignores_removed_options():
     spec = model_to_spec(_floating_rho_model())
-    del spec["dynamics_microbatch_size"]
+    del spec["normalization_chunk_size"]
+    spec["dynamics_microbatch_size"] = 12_345  # option removed from the package
     restored = model_from_spec(spec)
-    assert restored.dynamics_microbatch_size == 20_000
+    assert restored.normalization_chunk_size == "auto"
+    assert not hasattr(restored, "dynamics_microbatch_size")
 
 
 def test_export_import_file_round_trip(tmp_path):

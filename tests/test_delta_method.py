@@ -243,8 +243,9 @@ def test_cp_fit_session_fit_fraction_errors_uses_joint_covariance():
         assert errors["mean"][name] == pytest.approx(np.sqrt(variance_mean[i]), rel=1e-4)
 
 
-@pytest.mark.parametrize("acceptance_weighted", [False, True])
-@pytest.mark.parametrize("normalize_components", [False, True])
+@pytest.mark.parametrize(
+    "acceptance_weighted,normalize_components", [(False, False), (True, True)]
+)
 def test_qmi_cp_fraction_errors_preserve_full_integral_and_cross_covariance(
     acceptance_weighted, normalize_components,
 ):

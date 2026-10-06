@@ -15,11 +15,7 @@ from jaxpwa.amplitude import (
     ConstantAmplitude,
     PreparedAmplitudeCache,
 )
-from jaxpwa.amplitude.cache import (
-    DEFAULT_DYNAMICS_MICROBATCH_PARALLELISM,
-    DEFAULT_DYNAMICS_MICROBATCH_SIZE,
-    DEFAULT_NORMALIZATION_CHUNK_SIZE,
-)
+from jaxpwa.amplitude.cache import DEFAULT_NORMALIZATION_CHUNK_SIZE
 from jaxpwa.amplitude.components import coefficient_value
 from jaxpwa.dynamics import (
     CovariantAngular,
@@ -406,24 +402,17 @@ class DecayModel:
         A common weight scale changes the density measure; use consistent
         conventions across components and charge samples.
     normalization_chunk_size:
-        Maximum number of normalization points in one prepared macro-chunk.
-        The effective static width is balanced automatically below this limit
-        to minimize padding. Smaller values reduce preparation memory at the
-        cost of more chunk executions. Floating-dynamics evaluation may
-        subdivide these blocks further to bound automatic-differentiation
-        memory. Default: 100000.
-    dynamics_microbatch_size:
-        Maximum number of normalization points differentiated together inside
-        each floating-dynamics macro-chunk. The effective static width is
-        balanced automatically below this limit to minimize padding. Larger
-        values can improve throughput on GPUs with more VRAM; smaller values
-        lower peak AD memory. QMI is prepared directly under this limit because
-        its cached order is block-local. Default: 20000.
-    dynamics_microbatch_parallelism:
-        Number of ordinary floating-dynamics microbatches evaluated concurrently
-        with ``vmap`` inside each macro-chunk. Larger values can improve GPU
-        throughput at the cost of peak AD memory. QMI keeps this at one because
-        its prepared order is block-local. Default: 1.
+        ``"auto"`` (default) or a positive integer. With floating dynamics the
+        normalization is accumulated in blocks of at most this many points, so
+        the memory of the reverse-AD pass does not grow with the grid size.
+        ``"auto"`` measures that cost on the first normalization points
+        (compile-time memory of the Hessian-vector product) and picks the
+        largest block that fits half of the free device memory; without device
+        memory statistics (CPU) it uses 100000. An integer overrides this.
+        Coefficient-only fits use blocks of 100000 points, which only amortize
+        XLA compilation. The effective block width is balanced below the limit
+        to minimize padding. The chunk size changes the evaluation schedule,
+        not the normalization integral.
 
     Notes
     -----
@@ -443,9 +432,8 @@ class DecayModel:
     normalization_narrow_width: float
     normalization_narrow_window: float
     normalization_binning_factor: float
-    normalization_chunk_size: int
-    dynamics_microbatch_size: int
-    dynamics_microbatch_parallelism: int
+    normalization_chunk_size: int | str
+    _auto_chunk_memo: dict[tuple, int]
     _normalization_sample: PhaseSpaceSample | None
     _amplitude_model: CoherentAmplitudeModel | None
     _compact_prepare_kernels: dict[tuple[bool, bool], object]
@@ -468,11 +456,9 @@ class DecayModel:
         normalization_order_m23: int | None = None,
         normalization_narrow_width: float = 0.020,
         normalization_narrow_window: float = 5.0,
-        normalization_binning_factor: float = 20.0, 
+        normalization_binning_factor: float = 100.0,
         normalization_sample: PhaseSpaceSample | None = None,
-        normalization_chunk_size: int = DEFAULT_NORMALIZATION_CHUNK_SIZE,
-        dynamics_microbatch_size: int = DEFAULT_DYNAMICS_MICROBATCH_SIZE,
-        dynamics_microbatch_parallelism: int = DEFAULT_DYNAMICS_MICROBATCH_PARALLELISM,
+        normalization_chunk_size: int | str = "auto",
     ) -> None:
         if normalization_resolution < 2:
             raise ValueError("normalization_resolution must be at least 2")
@@ -507,21 +493,13 @@ class DecayModel:
             raise ValueError("normalization_narrow_window must be positive")
         if normalization_binning_factor <= 0.0:
             raise ValueError("normalization_binning_factor must be positive")
-        if normalization_chunk_size < 1:
-            raise ValueError("normalization_chunk_size must be positive")
-        if (
-            isinstance(dynamics_microbatch_size, bool)
-            or not isinstance(dynamics_microbatch_size, int)
-            or dynamics_microbatch_size < 1
-        ):
-            raise ValueError("dynamics_microbatch_size must be a positive integer")
-        if (
-            isinstance(dynamics_microbatch_parallelism, bool)
-            or not isinstance(dynamics_microbatch_parallelism, int)
-            or dynamics_microbatch_parallelism < 1
+        if normalization_chunk_size != "auto" and (
+            isinstance(normalization_chunk_size, bool)
+            or not isinstance(normalization_chunk_size, int)
+            or normalization_chunk_size < 1
         ):
             raise ValueError(
-                "dynamics_microbatch_parallelism must be a positive integer"
+                "normalization_chunk_size must be a positive integer or 'auto'"
             )
         object.__setattr__(self, "channel", channel)
         object.__setattr__(self, "components", tuple(components))
@@ -541,13 +519,8 @@ class DecayModel:
         object.__setattr__(
             self, "normalization_binning_factor", float(normalization_binning_factor)
         )
-        object.__setattr__(self, "normalization_chunk_size", int(normalization_chunk_size))
-        object.__setattr__(self, "dynamics_microbatch_size", dynamics_microbatch_size)
-        object.__setattr__(
-            self,
-            "dynamics_microbatch_parallelism",
-            dynamics_microbatch_parallelism,
-        )
+        object.__setattr__(self, "normalization_chunk_size", normalization_chunk_size)
+        object.__setattr__(self, "_auto_chunk_memo", {})
         object.__setattr__(self, "_normalization_sample", normalization_sample)
         object.__setattr__(self, "_amplitude_model", None)
         object.__setattr__(self, "_compact_prepare_kernels", {})
@@ -801,8 +774,6 @@ class DecayModel:
             normalization_binning_factor=self.normalization_binning_factor,
             normalization_sample=normalization_sample,
             normalization_chunk_size=self.normalization_chunk_size,
-            dynamics_microbatch_size=self.dynamics_microbatch_size,
-            dynamics_microbatch_parallelism=self.dynamics_microbatch_parallelism,
         )
 
     @property
@@ -1004,7 +975,14 @@ class DecayModel:
                 self.amplitude_model.components,
                 normalize_components=normalize_components,
                 has_efficiency=has_efficiency,
-                normalization_chunk_size=self.normalization_chunk_size,
+                compact_data_kernel=self._compact_data_kernel(
+                    normalize_components=normalize_components,
+                ),
+                normalization_chunk_size=(
+                    DEFAULT_NORMALIZATION_CHUNK_SIZE
+                    if self.normalization_chunk_size == "auto"
+                    else self.normalization_chunk_size
+                ),
             )
             self._compact_prepare_kernels[key] = kernel
         return kernel
@@ -1075,13 +1053,25 @@ class DecayModel:
         integral = jnp.mean(sample.weights * jnp.abs(raw) ** 2)
         return 1.0 / jnp.sqrt(integral)
 
-    def amplitude(self, data, values=None):
-        """Coherent sum of every component's coefficient-scaled dynamics at `data`."""
-        total = None
+    def component_amplitudes(self, data, values=None) -> dict:
+        """Each component's coefficient-scaled amplitude at `data`, keyed by name.
+
+        The terms ``amplitude()`` sums coherently: ``|component|^2`` is the
+        incoherent contribution of one component (e.g. for drawing it on a
+        projection), and the coherent total minus the sum of these is the
+        interference.
+        """
+        result = {}
         for component in self.amplitude_model.components:
             dynamics = jnp.asarray(component.function(data, values))
             coefficient = jnp.asarray(coefficient_value(component.coefficient, values))
-            component_values = coefficient * self._component_scale(component, values) * dynamics
+            result[component.name] = coefficient * self._component_scale(component, values) * dynamics
+        return result
+
+    def amplitude(self, data, values=None):
+        """Coherent sum of every component's coefficient-scaled dynamics at `data`."""
+        total = None
+        for component_values in self.component_amplitudes(data, values).values():
             total = component_values if total is None else total + component_values
         return jnp.asarray(total)
 
@@ -1172,8 +1162,7 @@ class DecayModel:
             normalize_components=normalize,
             compact_prepare_kernel=compact_kernel,
             normalization_chunk_size=self.normalization_chunk_size,
-            dynamics_microbatch_size=self.dynamics_microbatch_size,
-            dynamics_microbatch_parallelism=self.dynamics_microbatch_parallelism,
+            chunk_size_memo=self._auto_chunk_memo,
         )
         if can_reuse_normalization:
             self._fixed_normalization_templates[template_key] = (
@@ -1411,12 +1400,12 @@ class DecayModel:
             for index, component in enumerate(cache.components)
         }
 
-    def _fraction_jacobian(self, cache, values, parameter_names):
+    def _fraction_jacobian(self, cache, values, parameter_names, quantity="fit_fractions"):
         names = tuple(parameter_names)
-        key = (names, cache.normalize_components, cache._component_partitions())
+        key = (names, cache.normalize_components, cache._component_partitions(), quantity)
         kernel = self._fraction_jacobian_kernels.get(key)
         if kernel is None:
-            kernel = cache._build_fraction_jacobian_kernel(names)
+            kernel = cache._build_fraction_jacobian_kernel(names, quantity)
             self._fraction_jacobian_kernels[key] = kernel
         return kernel(values, cache._fraction_jacobian_arrays())
 
