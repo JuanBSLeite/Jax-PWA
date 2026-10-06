@@ -362,6 +362,22 @@ def test_weighted_cp_fit_validates_weight_pair():
         session.fit(weights=(jnp.ones(2), jnp.ones(3)))
     with pytest.raises(ValueError, match="requires event weights"):
         session.fit(covariance="sandwich")
+    with pytest.raises(ValueError, match="plus weights must be real"):
+        session.fit(weights=(jnp.ones(2, dtype=complex), jnp.ones(2)))
+
+
+def test_cp_joint_nll_rejects_one_sided_efficiency_array():
+    from jaxpwa.likelihood import CPJointNLL
+
+    plus, minus = _fixed_scale_models()
+    session = CPFitSession(plus, minus, _data(), _data(0.02))
+    with pytest.raises(ValueError, match="must be supplied together"):
+        CPJointNLL(
+            session.plus_cache,
+            session.minus_cache,
+            plus_efficiency=jnp.ones(2),
+            minus_efficiency=None,
+        )
 
 
 def test_weighted_cp_joint_nll_rejects_non_finite_weights_and_background():

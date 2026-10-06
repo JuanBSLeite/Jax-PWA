@@ -335,6 +335,16 @@ for `"sumw2"`. The squared-weight Hessian expression is commonly used but is
 not generally identical to the Godambe covariance; equality requires an
 additional score/Hessian information-identity relation.
 
+Gaussian constraints are fixed penalties, not event fluctuations: they enter
+the sensitivity matrix `A` but neither `B` nor `H_w2`. For a weighted
+Gaussian location fit with a constraint of width `s`,
+`A = sum_i w_i + 1/s^2` and `C_sumw2 = sum_i w_i^2 / A^2`.
+
+A zero-weight event contributes exactly zero to the weighted objective, even
+at a physical PDF zero where `log p_i = -inf`. Gradients stay finite there
+only because Jax-PWA's signal log-densities use a safe logarithm; a custom
+`logpdf` passed to `WeightedUnbinnedNLL` must do the same.
+
 ### JAX Hessian behavior during minimization
 
 For all corrected weighted covariance modes (`"sandwich"`, `"sumw2"`, and

@@ -291,6 +291,8 @@ class CPFitSession:
         for label, array, sample in (("plus", plus_weights, self.plus_data), ("minus", minus_weights, self.minus_data)):
             if array.shape != (sample.size,):
                 raise ValueError(f"{label} weights must have shape ({sample.size},), got {array.shape}")
+            if jnp.iscomplexobj(array):
+                raise ValueError(f"{label} weights must be real")
             if not bool(jnp.all(jnp.isfinite(array))):
                 raise ValueError(f"{label} weights must be finite")
         return plus_weights, minus_weights
@@ -404,6 +406,7 @@ class CPFitSession:
                 tolerance=tolerance, verbose=verbose, hessian=hessian,
             ),
             weighted_objective=self._weighted_objective,
+            event_weighted_objective=self._weighted_nll,
             score_outer_objective=self._score_outer_objective,
             parameters=self.parameters,
             weights=self.event_weights if weights is None else tuple(weights),

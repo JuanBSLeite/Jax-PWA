@@ -158,6 +158,10 @@ def _install_minuit_covariance(result, names: Sequence[str], covariance) -> None
     scale = max(1.0, float(np.max(np.abs(diagonal), initial=0.0)))
     if np.any(diagonal < -1e-10 * scale):
         raise ValueError("corrected covariance has a negative diagonal element")
+    eigenvalues = np.linalg.eigvalsh(values)
+    eigenvalue_scale = max(1.0, float(np.max(np.abs(eigenvalues), initial=0.0)))
+    if np.any(eigenvalues < -1e-10 * eigenvalue_scale):
+        raise ValueError("corrected covariance must be positive semidefinite")
 
     matrix = Matrix(names)
     matrix[:] = values
@@ -182,6 +186,7 @@ def _fit_with_optional_weights(
     *,
     unweighted_minimizer,
     weighted_objective,
+    event_weighted_objective,
     score_outer_objective,
     parameters,
     weights,
@@ -202,7 +207,8 @@ def _fit_with_optional_weights(
 
     ``unweighted_minimizer()`` builds the ordinary minimizer used when
     ``weights is None``. ``weighted_objective(weights)`` returns the
-    signal-only objective ``-sum_i w_i log p_i`` (plus any constraints) and
+    signal-only objective ``-sum_i w_i log p_i`` plus any constraints,
+    ``event_weighted_objective(weights)`` returns the event term alone, and
     ``score_outer_objective(weights, fitted)`` a scalar whose Hessian at
     ``fitted`` is ``sum_i w_i^2 s_i s_i^T``. With
     ``covariance="sandwich"|"sumw2"|"sweight"`` the result's covariance and
@@ -284,7 +290,9 @@ def _fit_with_optional_weights(
     fitted = {name: float(result.values[name]) for name in result.parameters}
     names, weighted_hessian = minimizer.jax_hessian(fitted)
     if covariance in ("sweight", "sumw2"):
-        second_objective = weighted_objective(_square_weights(weights))
+        # Fixed constraints contribute to the sensitivity matrix above, but
+        # are not event fluctuations and do not belong in H_w2.
+        second_objective = event_weighted_objective(_square_weights(weights))
         label = "weighted and squared-weight Hessians"
     else:
         second_objective = score_outer_objective(weights, fitted)
@@ -610,8 +618,8 @@ class FitSession:
             nll = ConstrainedNLL(nll, *self.constraints)
         return nll
 
-    def _weighted_objective(self, weights):
-        """Signal-only weighted NLL used for sWeight/sPlot Dalitz fits."""
+    def _weighted_nll(self, weights):
+        """Signal-only event term used for sWeight/sPlot Dalitz fits."""
 
         if (
             self.backgrounds
@@ -627,11 +635,15 @@ class FitSession:
         # Materialize cached properties before JAX traces the weighted objective.
         _ = self.signal_cache
         _ = self.acceptance_data
-        nll: object = WeightedUnbinnedNLL(
+        return WeightedUnbinnedNLL(
             self._cached_signal_logpdf,
             self.data.as_dict(),
             weights,
         )
+
+    def _weighted_objective(self, weights):
+        """Weighted signal event term plus this session's constraints."""
+        nll: object = self._weighted_nll(weights)
         if self.constraints:
             nll = ConstrainedNLL(nll, *self.constraints)
         return nll
@@ -661,9 +673,12 @@ class FitSession:
         )
 
         def objective(parameters):
-            delta = (
-                jnp.asarray(self._cached_signal_logpdf(data, parameters))
-                - reference
+            current = jnp.asarray(self._cached_signal_logpdf(data, parameters))
+            active = weights_array != 0
+            delta = jnp.where(
+                active,
+                current - jnp.where(active, reference, 0.0),
+                0.0,
             )
             return 0.5 * jnp.sum(jnp.square(weights_array) * jnp.square(delta))
 
@@ -764,6 +779,7 @@ class FitSession:
                 hessian=hessian,
             ),
             weighted_objective=self._weighted_objective,
+            event_weighted_objective=self._weighted_nll,
             score_outer_objective=self._score_outer_objective,
             parameters=self.parameters,
             weights=weights,

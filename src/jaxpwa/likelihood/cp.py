@@ -208,6 +208,8 @@ class CPJointNLL:
                 weights = jnp.asarray(getattr(self, f"{charge}_weights"))
                 if weights.shape != (size,):
                     raise ValueError(f"{charge}_weights must have shape ({size},), got {weights.shape}")
+                if jnp.iscomplexobj(weights):
+                    raise ValueError(f"{charge}_weights must be real")
                 if not bool(jnp.all(jnp.isfinite(weights))):
                     raise ValueError(f"{charge}_weights must be finite")
                 object.__setattr__(self, f"{charge}_weights", weights)
@@ -273,6 +275,7 @@ class CPJointNLL:
         intensity_minus, integral_minus = self.minus_cache.evaluate(parameters)
         if self.plus_efficiency is not None:
             intensity_plus = jnp.asarray(self.plus_efficiency) * intensity_plus
+        if self.minus_efficiency is not None:
             intensity_minus = jnp.asarray(self.minus_efficiency) * intensity_minus
         total_integral = integral_plus + integral_minus
         valid = (jnp.isfinite(integral_plus) & jnp.isfinite(integral_minus)
