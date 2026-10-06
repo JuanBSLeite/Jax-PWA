@@ -20,15 +20,15 @@ NumPy imports alone do not indicate host work in the repeated JAX likelihood.
 | `four_body.py` | Square root of the static exchange count | No meaningful runtime migration target. |
 | `kinematics/nbody.py`, `likelihood/time_dependent.py` | Input validation | Keep validation; large-array checks could reduce on device and transfer scalar flags if setup profiling identifies a bottleneck. |
 | `fit/minimizer.py` | Minuit interface, parameter vectors and result/Hessian handling | Host boundary is needed by iminuit. Small vectors and matrices are suitable for NumPy; objective and differentiation remain JAX. |
-| `fit/nesterov.py` | Projected optimizer loop and host inspection of value/gradient | Candidate for a device-resident optimizer loop when dispatch/transfer dominates. Replacing individual `np.clip` calls would not remove synchronization. Requires convergence and continuation tests. |
+| `fit/nesterov.py` | Projected optimizer loop and result construction | The complete iteration/backtracking loop is now device-resident. NumPy remains only for small input/output vectors. |
 | `likelihood/weighted.py` | Post-fit covariance assembly/linear algebra | Keep small parameter-space matrices on CPU unless large-parameter benchmarks justify migration. Event-side derivatives remain JAX. |
 | `io/root.py`, `plotting.py` | ROOT/Matplotlib boundaries and histograms | Keep the host interface. A GPU histogram path could help repeated large projections but needs an end-to-end measurement. |
 | `workflow.py`, `cp_workflow.py`, `time_dependent_workflow.py`, `projection_toys.py` | Projection histograms, covariance propagation and mixture bookkeeping | Mostly post-fit or orchestration work. Consolidating transfers may help large plots; no evidence that a blanket rewrite improves fitting. |
 | `goodness_of_fit.py` | Histograms and SciPy spatial trees | Keep the spatial tree; replacing it with dense pair distances changes memory scaling. The PPD kernel is already JAX. Fixed a separate single-neighbour shape bug. |
 | `resolution/scf.py` | Dense-to-sparse construction | Prefer constructing `SparseMigration` directly when possible. Extracting a variable number of nonzeros is setup, not repeated PDF evaluation. |
 | `toy_inverse.py` | Small category counts and seeds | Event-level inverse transforms already run in JAX. Little expected benefit from moving seed bookkeeping. |
-| `toy_accept.py` | Local-envelope reductions, accepted-index compaction and seeds | Large device-to-host arrays are a real migration candidate. Isolated reduction benchmark below is promising when reused, but its cold cost and infrequent invocation matter. |
-| `time_dependent_toy.py` | Event-sized proposals and weighted resampling | Strong candidate for future device-resident generation. Migrating RNG changes fixed-seed samples; validate distributions, physical support and closure before adopting. |
+| `toy_accept.py` | Local-envelope reductions, accepted-index compaction and seeds | Tested end to end; device compaction slowed the 100,000-event benchmark and was reverted. |
+| `time_dependent_toy.py` | Event-sized proposals and weighted resampling | Device resampling was much slower for the large proposal CDF and was reverted. A separate tag-probability bias found during the experiment was fixed. |
 
 No direct NumPy import was found in `dynamics/lineshape/`. Static quadrature
 construction may be invoked while a PDF is traced, but cached NumPy rules do
@@ -54,6 +54,44 @@ candidate remains in the benchmark, not production. Moving pilot reduction,
 proposal generation and accepted-event compaction together deserves a complete
 toy-generation benchmark before adoption. Current physics/RNG behaviour is
 unchanged.
+
+An end-to-end follow-up confirmed why the isolated result is insufficient:
+moving envelope setup and accepted-index compaction to JAX increased warm
+100,000-event accept-reject generation from roughly 1.08 s to 1.46 s on the
+local GPU. Those production changes were reverted.
+
+## Device-resident Nesterov: applied
+
+The projected Nesterov loop now keeps its iterations, gradients, projections,
+two-attempt restart and backtracking on the JAX device. It transfers the final
+endpoint and history once. Origin, scales, bounds, fixed values and `gtol` are
+runtime inputs, so repeated fits of the same live objective reuse the compiled
+solver when their parameter layout and `max_iter` agree.
+
+For the benchmark's two-parameter Rosenbrock objective, the endpoint, status,
+530 objective evaluations and NLL agreed with the former implementation.
+Repeated runs fell from about 201 ms to 27 ms (7.4x). Cold time rose from about
+281 ms to 418 ms. Tests cover bounds, changed runtime scales/fixed values,
+monotone history, failed line searches, stalling, compiled reuse and release of
+dead objectives.
+
+## Time-dependent toy: migration rejected, probability fix retained
+
+Moving proposal generation and weighted CDF sampling to JAX preserved the
+tested distributions but performed poorly at the production default of 20
+proposal points per output event. For 100,000 output events, both
+`jnp.searchsorted` and a vectorized binary search over the two-million-point CDF
+took tens of seconds, versus about 0.8 s warm for the existing NumPy resampling
+path. The migration was reverted.
+
+The experiment exposed an independent correctness issue. Tags are already
+drawn with probability `pi_q`, while the target is `pi_q * p(z,t|q)`; therefore
+`pi_q` cancels from the importance ratio. The old code multiplied it into the
+weights again. With `production_fraction=0.75` and zero wrong-tag rate, the old
+benchmark returned about 90% positive tags instead of 75%. The final corrected
+NumPy run returned 75.4%. Distribution tests now cover finite/infinite time ranges,
+lifetime mean, true and observed tag fractions, wrong-tag rate, momenta and
+fixed-seed reproducibility.
 
 ## Compilation: applied reuse fix
 
@@ -122,9 +160,9 @@ for compatibility, thresholds and cache administration.
   build some kernels per prepared cache. Sharing those kernels needs correct
   model/parameter ownership keys; the three-body fix should not be copied
   blindly across these paths.
-- Nesterov creates a fit-specific closure including origin/scales. Passing
-  these as runtime inputs may allow reuse across fits, but must preserve its
-  parameter-scaling and rejected-continuation semantics.
+- The Nesterov solver is shared per live objective, parameter layout,
+  `max_iter` and verbosity cadence. Different iteration budgets still compile
+  separate programs.
 - Do not trade float64 precision or normalization resolution for shorter
   compilation. Neither was reduced in these changes. Likewise, aggressive loop
   unrolling can increase cold compilation even when it helps execution, as the

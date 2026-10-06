@@ -40,6 +40,13 @@ for the full inventory, reproducible benchmarks, configuration example and
 remaining candidates. Persistent caching is optional and is not enabled
 globally by importing Jax-PWA.
 
+The optional Nesterov prefit also keeps its complete iteration and backtracking
+loop on device. Repeated runs of the same live objective reuse the solver while
+starts, scales, bounds and fixed values remain runtime inputs. A small local
+Rosenbrock benchmark improved from about 201 ms to 27 ms after compilation;
+the cold call became slower, so this mainly benefits repeated or expensive
+prefits. See [fitting](fitting.md) for convergence semantics.
+
 ## Prepared single-sample fits
 
 `FitSession` prepares a `PreparedAmplitudeCache` before repeated likelihood calls. For fixed resonance dynamics, the cache stores the component values on the data and the normalization matrix

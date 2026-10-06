@@ -1,4 +1,4 @@
-"""Compare the former host envelope update with the production JAX reduction.
+"""Compare the existing host envelope update with an experimental JAX reduction.
 
 This isolates a rare accept-reject restart operation, not complete generation.
 The first repetition includes JIT; subsequent repetitions reuse that executable.
@@ -17,12 +17,10 @@ import numpy as np
 from jaxpwa.toy_accept import _update_local_envelopes
 
 
-def _host_update(envelopes, cells, scores):
-    cells = np.asarray(jax.device_get(cells), dtype=np.int32)
-    scores = np.asarray(jax.device_get(scores), dtype=float)
-    maxima = np.zeros_like(envelopes)
-    np.maximum.at(maxima, cells, scores)
-    return np.maximum(envelopes, 1.2 * maxima)
+@jax.jit
+def _candidate(envelopes, cells, scores):
+    maxima = jnp.zeros_like(envelopes).at[cells].max(scores)
+    return jnp.maximum(envelopes, 1.2 * maxima)
 
 
 def main():
@@ -39,25 +37,41 @@ def main():
             # Fresh arrays avoid reusing a cached device-to-host copy.
             key = jax.random.key(i)
             cells = jax.random.randint(key, (n,), 0, 400)
-            scores = jax.random.uniform(
-                jax.random.fold_in(key, 1), (n,), dtype=jnp.float64,
-            ) * 2
+            scores = (
+                jax.random.uniform(
+                    jax.random.fold_in(key, 1),
+                    (n,),
+                    dtype=jnp.float64,
+                )
+                * 2
+            )
             jax.block_until_ready((cells, scores))
             start = perf_counter()
-            old = _host_update(envelopes, cells, scores)
+            old = _update_local_envelopes(
+                envelopes,
+                cells,
+                scores,
+                envelope_safety=1.2,
+            )
             old_times.append(perf_counter() - start)
             start = perf_counter()
-            new = np.asarray(jax.device_get(
-                _update_local_envelopes(
-                    jnp.asarray(envelopes), cells, scores, envelope_safety=1.2,
-                )
-            ))
+            new = np.asarray(
+                jax.device_get(_candidate(jnp.asarray(envelopes), cells, scores))
+            )
             new_times.append(perf_counter() - start)
             np.testing.assert_array_equal(old, new)
-        print(json.dumps({
-            "points": n, "numpy_seconds": old_times, "jax_seconds": new_times,
-            "device": str(jax.devices()[0]), "x64": jax.config.jax_enable_x64,
-        }), flush=True)
+        print(
+            json.dumps(
+                {
+                    "points": n,
+                    "numpy_seconds": old_times,
+                    "jax_seconds": new_times,
+                    "device": str(jax.devices()[0]),
+                    "x64": jax.config.jax_enable_x64,
+                }
+            ),
+            flush=True,
+        )
 
 
 if __name__ == "__main__":

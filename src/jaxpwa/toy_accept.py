@@ -204,18 +204,6 @@ def _phase_space_cells(
     return iu * v_bins + iv
 
 
-@jax.jit
-def _cell_maxima(envelopes, cells, scores):
-    """Reduce on device; only the small envelope vector is ever needed."""
-    return jnp.zeros_like(envelopes).at[cells].max(scores)
-
-
-@jax.jit
-def _initial_envelopes(envelopes, cells, scores, envelope_safety):
-    maxima = _cell_maxima(envelopes, cells, scores)
-    return envelope_safety * jnp.where(maxima > 0, maxima, jnp.max(scores))
-
-
 def _pilot_local_envelopes(
     model,
     pilot: PhaseSpaceSample,
@@ -223,30 +211,42 @@ def _pilot_local_envelopes(
     *,
     grid_shape: tuple[int, int],
     envelope_safety: float,
-) -> jax.Array:
-    """Build positive local envelopes, retaining support in unvisited cells."""
-    cells = _phase_space_cells(model, pilot, grid_shape)
-    if float(jnp.max(pilot_scores)) <= 0.0:
+) -> np.ndarray:
+    """Build strictly positive local envelopes from a uniform pilot sample."""
+
+    cells = np.asarray(
+        jax.device_get(_phase_space_cells(model, pilot, grid_shape)), dtype=np.int32
+    )
+    scores = np.asarray(jax.device_get(pilot_scores), dtype=float)
+    n_cells = int(grid_shape[0] * grid_shape[1])
+    maxima = np.zeros((n_cells,), dtype=float)
+    np.maximum.at(maxima, cells, scores)
+
+    global_max = float(np.max(scores))
+    if global_max <= 0.0:
         raise ValueError("toy density is zero over the pilot phase-space sample")
-    return _initial_envelopes(
-        jnp.zeros(grid_shape[0] * grid_shape[1], dtype=pilot_scores.dtype),
-        cells, pilot_scores, envelope_safety,
-    )
+
+    # An unvisited cell must retain non-zero proposal support. With the
+    # occupancy-aware grid this is uncommon; use the conservative global pilot
+    # maximum there so no physical region is excluded.
+    maxima[maxima <= 0.0] = global_max
+    return float(envelope_safety) * maxima
 
 
-@jax.jit
-def _update_local_envelopes(envelopes, cells, scores, *, envelope_safety):
-    """Raise exceeded envelopes on device before a full safe restart."""
-    return jnp.maximum(
-        envelopes, envelope_safety * _cell_maxima(envelopes, cells, scores)
-    )
+def _update_local_envelopes(
+    envelopes: np.ndarray,
+    cells: jax.Array,
+    scores: jax.Array,
+    *,
+    envelope_safety: float,
+) -> np.ndarray:
+    """Raise every exceeded local envelope before a full safe restart."""
 
-
-@jax.jit
-def _accepted_indices(key, score, denominator):
-    """Return fixed-size device indices and a scalar valid-prefix length."""
-    mask = jax.random.uniform(key, score.shape, dtype=score.dtype) < score / denominator
-    return jnp.nonzero(mask, size=mask.size, fill_value=0)[0], jnp.sum(mask)
+    cells_host = np.asarray(jax.device_get(cells), dtype=np.int32)
+    scores_host = np.asarray(jax.device_get(scores), dtype=float)
+    maxima = np.zeros_like(envelopes)
+    np.maximum.at(maxima, cells_host, scores_host)
+    return np.maximum(envelopes, float(envelope_safety) * maxima)
 
 
 def _frozen_model_intensity(model, values: Mapping[str, object]):
@@ -428,7 +428,7 @@ def _accept_reject_component(
             grid_shape=grid_shape,
             envelope_safety=envelope_safety,
         )
-        estimated_efficiency = mean_score / float(jnp.mean(local_envelopes))
+        estimated_efficiency = mean_score / float(np.mean(local_envelopes))
     else:
         envelope = envelope_safety * observed_max
         estimated_efficiency = mean_score / envelope
@@ -465,7 +465,7 @@ def _accept_reject_component(
         if proposal_index > 10_000:
             raise RuntimeError("accept-reject toy generation did not converge")
         if compact_proposal:
-            probabilities = local_envelopes / jnp.sum(local_envelopes)
+            probabilities = local_envelopes / np.sum(local_envelopes)
             pool, proposal_cells = model.generate_stratified_phase_space(
                 batch_size,
                 integration_weights=False,
@@ -538,12 +538,18 @@ def _accept_reject_component(
             denominator = envelope
 
         accept_key = jax.random.key(int(accept_rng.integers(0, 2**32, dtype=np.uint32)))
-        indices, count = _accepted_indices(accept_key, score, denominator)
-        count = min(int(count), size - n_accepted)
-        if count == 0:
+        mask = jax.random.uniform(
+            accept_key,
+            (pool.size,),
+            dtype=score.dtype,
+        ) < (score / denominator)
+        indices = np.flatnonzero(np.asarray(jax.device_get(mask), dtype=bool))
+        if indices.size == 0:
             continue
-        accepted.append(pool.take(indices[:count]))
-        n_accepted += count
+        needed = size - n_accepted
+        selected = indices[:needed]
+        accepted.append(pool.take(jnp.asarray(selected, dtype=jnp.int32)))
+        n_accepted += int(selected.size)
 
     toy = _merge_samples(accepted)
     if toy.size != size:

@@ -194,6 +194,10 @@ Validation was run on both CPU and CUDA:
   cache/model/workflow/regression cases.
 - The final NumPy follow-up passed 28 CPU cases: the 19 audit regression cases
   and the goodness-of-fit tests, including both single-neighbour reproductions.
+- The candidate-migration follow-up passed 72 focused CPU cases after retaining
+  the device-resident Nesterov loop, reverting slower toy-generation paths and
+  fixing the time-dependent toy tag-probability ratio. The detailed benchmark
+  and distribution checks are in `20261006_numpy_compilation.md`.
 - Ruff passed for the changed files without existing lint debt. Comparing
   baseline/current diagnostics for `decay.py`, `goodness_of_fit.py` and the
   existing fit benchmark found no added diagnostics; their 27, 10 and 2 existing

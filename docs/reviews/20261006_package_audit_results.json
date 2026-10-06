@@ -430,6 +430,35 @@
     "toy_inverse.py",
     "workflow.py"
   ],
+  "jax_candidate_followup": {
+    "nesterov_baseline_seconds": [
+      0.2814820679996046,
+      0.2018945790005091,
+      0.2000175430002855
+    ],
+    "nesterov_device_loop_seconds": [
+      0.418321797002136,
+      0.02769420700133196,
+      0.027149163997819414
+    ],
+    "nesterov_fval": 1.236571983859472e-06,
+    "nesterov_nfcn": 530,
+    "accept_reject_100k_baseline_warm_seconds": [
+      1.0681261919999088,
+      1.080186106999463,
+      1.0948051939994912
+    ],
+    "accept_reject_100k_jax_candidate_warm_seconds": [
+      1.4520914339991577,
+      1.5306354430031206,
+      1.3997744439984672
+    ],
+    "accept_reject_candidate_retained": false,
+    "time_dependent_old_positive_tag_fraction": 0.89961,
+    "time_dependent_corrected_positive_tag_fraction": 0.75411,
+    "requested_production_fraction": 0.75,
+    "time_dependent_device_resampling_retained": false
+  },
   "validation": {
     "initial_collection_cases_covered_across_runs": 882,
     "partial_cpu_suite_passed": 238,
@@ -439,6 +468,9 @@
     "minuit_regression_cuda_passed": 51,
     "shared_data_kernel_cuda_passed": 96,
     "numpy_followup_cpu_passed": 28,
+    "jax_migration_focused_cpu_passed": 72,
+    "jax_migration_focused_gpu_passed": 10,
+    "jax_migration_public_regressions_cpu_passed": 7,
     "note": "Counts overlap. Original coverage uses the saved initial collection; concurrent test edits were preserved. No uninterrupted full-suite run is claimed."
   }
 }

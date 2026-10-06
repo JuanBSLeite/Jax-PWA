@@ -34,6 +34,16 @@ bounds, backtracking, and restart after a failed extrapolation. It is a
 nonconvex heuristic here: the convex (O(1/k^2)) guarantee does not apply to
 the amplitude likelihood, and the result is not a global-minimum guarantee.
 
+Iterations, projected-gradient checks and both backtracking attempts execute
+inside one JAX program. Only the final endpoint and history are transferred to
+the host. The compiled solver is reused while the objective remains alive;
+starting values, parameter scales, bounds and fixed values are runtime inputs.
+Changing `nesterov_max_iter` or the parameter-name layout creates a different
+program. In the local two-parameter Rosenbrock benchmark, repeated 530-evaluation
+runs fell from about 201 ms to 27 ms, while the first JIT call increased from
+about 281 ms to 418 ms. Large likelihoods can have a different balance between
+objective execution and dispatch overhead.
+
 The Nesterov stage stops with `status="stalled"` after five consecutive
 accepted iterations without any NLL decrease. This happens when backtracking
 has shrunk the step to floating-point resolution, typically near a point where

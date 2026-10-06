@@ -4,7 +4,6 @@ import gc
 import weakref
 from dataclasses import replace
 
-import jax
 import jax.numpy as jnp
 import numpy as np
 import pytest
@@ -19,12 +18,6 @@ from jaxpwa import (
     generate_time_dependent_toy,
 )
 from jaxpwa.fit.nesterov import _SOLVERS, minimize
-from jaxpwa.time_dependent_toy import _resample_indices
-from jaxpwa.toy_accept import (
-    _accepted_indices,
-    _initial_envelopes,
-    _update_local_envelopes,
-)
 
 
 def test_nesterov_bounds_fixed_values_and_runtime_inputs_reuse():
@@ -84,43 +77,6 @@ def test_nesterov_solver_does_not_retain_objective():
     assert not any(key[0] == identity for key in _SOLVERS)
 
 
-def test_device_envelopes_preserve_empty_cells_and_monotonic_restarts():
-    cells = jnp.array([0, 0, 2, 2, 3])
-    scores = jnp.array([0.0, 2.0, 1.0, 4.0, 0.0])
-    pilot = _initial_envelopes(jnp.zeros(5), cells, scores, 1.2)
-    np.testing.assert_allclose(pilot, [2.4, 4.8, 4.8, 4.8, 4.8])
-    updated = _update_local_envelopes(pilot, cells, scores * 2, envelope_safety=1.2)
-    np.testing.assert_allclose(updated, [4.8, 4.8, 9.6, 4.8, 4.8])
-    assert np.all(np.asarray(updated) >= np.asarray(pilot))
-
-
-@pytest.mark.parametrize("fraction", [0.0, 0.37, 1.0])
-def test_device_compaction_preserves_acceptance_order(fraction):
-    key = jax.random.key(23)
-    score = jnp.full(1024, fraction)
-    indices, count = _accepted_indices(key, score, 1.0)
-    reference = np.flatnonzero(
-        np.asarray(
-            jax.random.uniform(
-                key,
-                score.shape,
-                dtype=score.dtype,
-            )
-        )
-        < fraction
-    )
-    assert int(count) == reference.size
-    np.testing.assert_array_equal(indices[: int(count)], reference)
-
-
-@pytest.mark.parametrize(
-    "weights", [[0.0, 0.0], [1.0, -1.0], [1.0, float("nan")], [1.0, float("inf")]]
-)
-def test_temporal_resampling_rejects_invalid_weights(weights):
-    _, valid = _resample_indices(jax.random.key(1), jnp.array(weights), jnp.ones(2), 10)
-    assert not bool(valid)
-
-
 @pytest.mark.parametrize("high", [1.4, float("inf")])
 def test_temporal_toy_lifetime_tags_reproducibility_and_momenta(high):
     low, tau = 0.2, 0.4103
@@ -166,3 +122,24 @@ def test_temporal_toy_lifetime_tags_reproducibility_and_momenta(high):
         (toy.data.p1, repeated.data.p1),
     ):
         np.testing.assert_array_equal(a, b)
+
+
+@pytest.mark.parametrize("efficiency_value", [0.0, float("nan")])
+def test_temporal_toy_rejects_invalid_public_importance_weights(efficiency_value):
+    model = DecayModel(
+        DecayChannel("D0", ("K(S)0", "pi+", "pi-")),
+        [NonResonant(1.0)],
+        normalization_method="square-dalitz",
+        normalization_resolution=8,
+    )
+    sample = model.generate_phase_space(8, seed=1, include_momenta=False)
+    session = TimeDependentFitSession(
+        model,
+        sample,
+        jnp.linspace(0.1, 1.0, 8),
+        jnp.array([1, -1] * 4),
+        NeutralMesonMixing(0.0, 0.0, 0.4103),
+        efficiency=lambda data: jnp.full(data["s12"].shape, efficiency_value),
+    )
+    with pytest.raises(ValueError, match="invalid weights|finite and non-negative"):
+        generate_time_dependent_toy(session, 10, proposal_size=100, seed=7)
