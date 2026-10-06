@@ -27,6 +27,7 @@ cuda12 = ["jax[cuda12]>=0.4.35"]
 cuda13 = ["jax[cuda13]>=0.4.35"]
 test = ["pytest>=8.0", "pytest-cov>=5.0"]
 dev = ["jax-pwa[test]", "ruff>=0.9"]
+docs = ["sphinx>=7.3", "myst-parser>=3.0", "furo>=2024.1"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/jaxpwa"]
