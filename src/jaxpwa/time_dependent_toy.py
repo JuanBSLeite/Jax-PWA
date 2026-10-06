@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import secrets
 from dataclasses import dataclass, replace
+from functools import partial
 
+import jax
 import jax.numpy as jnp
-import numpy as np
 
 from .kinematics import PhaseSpaceSample
 from .time_dependent_workflow import _acceptance
@@ -21,25 +23,38 @@ class TimeDependentToy:
     true_tags: jnp.ndarray
 
 
-def _truncated_exponential_sample(rng, size, low, high, rate):
-    low = max(float(low), 0.0)
-    if np.isinf(high):
-        return low - np.log(rng.random(size)) / rate
-    high = float(high)
-    cdf_range = np.exp(-rate * low) - np.exp(-rate * high)
-    uniform = rng.random(size)
-    return -np.log(np.exp(-rate * low) - uniform * cdf_range) / rate
+@partial(jax.jit, static_argnames=("size",))
+def _time_proposal(key, size, low, high, rate, production_fraction, wrong):
+    """Device-resident tags and a stable truncated exponential proposal."""
+    tag_key, flip_key, time_key = jax.random.split(key, 3)
+    true_tags = jnp.where(
+        jax.random.uniform(tag_key, (size,)) < production_fraction, 1, -1
+    )
+    tags = jnp.where(
+        jax.random.uniform(flip_key, (size,)) < wrong, -true_tags, true_tags
+    )
+    low = jnp.maximum(low, 0.0)
+    cdf_range = -jnp.expm1(-rate * (high - low))
+    uniform = jax.random.uniform(time_key, (size,), dtype=jnp.float64)
+    times = low - jnp.log1p(-uniform * cdf_range) / rate
+    density = rate * jnp.exp(-rate * (times - low)) / cdf_range
+    return times, tags.astype(jnp.int32), true_tags.astype(jnp.int32), density
 
 
-def _truncated_exponential_density(times, low, high, rate):
-    low = max(float(low), 0.0)
-    times = np.asarray(times)
-    if np.isinf(high):
-        normalisation = np.exp(-rate * low)
-    else:
-        normalisation = np.exp(-rate * low) - np.exp(-rate * float(high))
-    density = rate * np.exp(-rate * times) / normalisation
-    return np.where((times >= low) & (times <= high), density, 0.0)
+@partial(jax.jit, static_argnames=("size",))
+def _resample_indices(key, density, proposal_time, size):
+    # The proposal already draws tags with the requested observed probability.
+    # That factor cancels between target and proposal; multiplying it again
+    # would bias, for example, a 75% tag fraction towards 90%.
+    weights = density / jnp.maximum(proposal_time, 1e-300)
+    total = jnp.sum(weights)
+    valid = jnp.all(jnp.isfinite(weights) & (weights >= 0)) & (total > 0)
+    valid &= jnp.isfinite(total)
+    cdf = jnp.cumsum(weights) / total
+    cdf = cdf.at[-1].set(1.0)
+    uniform = jax.random.uniform(key, (size,), dtype=cdf.dtype)
+    selected = jnp.searchsorted(cdf, uniform, side="right")
+    return selected, valid
 
 
 def generate_time_dependent_toy(
@@ -66,7 +81,8 @@ def generate_time_dependent_toy(
     observed tag is flipped with ``wrong_tag`` before the joint density is
     evaluated. Background generation is intentionally separate from this first
     signal generator and remains the responsibility of the session's background
-    APIs.
+    APIs. Proposals and resampling run in JAX. A seed is reproducible within
+    this implementation, but does not reproduce the former NumPy RNG samples.
     """
     if size <= 0:
         raise ValueError("size must be positive")
@@ -85,27 +101,24 @@ def generate_time_dependent_toy(
             "resolution and unit temporal acceptance"
         )
     proposal_size = (
-        max(20 * size, 20_000)
-        if proposal_size is None
-        else int(proposal_size)
+        max(20 * size, 20_000) if proposal_size is None else int(proposal_size)
     )
     if proposal_size < size:
         raise ValueError("proposal_size must be at least size")
 
     values = {} if parameters is None else parameters
     tau = float(session.mixing.resolved(values)[2])
-    rng = np.random.default_rng(seed)
-    true_tags = np.where(
-        rng.random(proposal_size) < float(production_fraction), 1, -1
-    ).astype(np.int32)
-    observed_tags = np.where(
-        rng.random(proposal_size) < wrong, -true_tags, true_tags
-    ).astype(np.int32)
-    times = _truncated_exponential_sample(
-        rng, proposal_size, session.time_range[0], session.time_range[1], 1.0 / tau
-    )
-    proposal_time = _truncated_exponential_density(
-        times, session.time_range[0], session.time_range[1], 1.0 / tau
+    if not jnp.isfinite(tau) or tau <= 0:
+        raise ValueError("mixing lifetime must be finite and positive")
+    key = jax.random.key(secrets.randbits(32) if seed is None else int(seed))
+    proposal_key, resample_key = jax.random.split(key)
+    times, observed_tags, true_tags, proposal_time = _time_proposal(
+        proposal_key,
+        proposal_size,
+        *session.time_range,
+        1.0 / tau,
+        float(production_fraction),
+        wrong,
     )
     sample = session.model.generate_phase_space(
         proposal_size, seed=seed, include_momenta=include_momenta
@@ -122,19 +135,14 @@ def generate_time_dependent_toy(
             session.efficiency, session.veto, candidate_sample.as_dict()
         ),
     )
-    density = np.asarray(objective.densities(values), dtype=float)
-    observed_probability = np.where(
-        observed_tags == 1,
-        float(production_fraction) * (1.0 - wrong)
-        + (1.0 - float(production_fraction)) * wrong,
-        float(production_fraction) * wrong
-        + (1.0 - float(production_fraction)) * (1.0 - wrong),
+    selected, valid = _resample_indices(
+        resample_key,
+        objective.densities(values),
+        proposal_time,
+        size,
     )
-    weights = density * observed_probability / np.maximum(proposal_time, 1e-300)
-    if not np.all(np.isfinite(weights) & (weights >= 0)) or not np.any(weights > 0):
+    if not bool(valid):
         raise ValueError("time-dependent toy proposal produced invalid weights")
-    probabilities = weights / weights.sum()
-    selected = rng.choice(proposal_size, size=size, replace=True, p=probabilities)
     selected_data = sample.take(jnp.asarray(selected))
     if not include_momenta:
         selected_data = selected_data.without_momenta()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import warnings
 import weakref
 from collections.abc import Callable, Mapping, Sequence
+from copy import deepcopy
 from dataclasses import dataclass
 from time import perf_counter
 
@@ -138,6 +139,7 @@ class Minimizer:
                 parameter.name,
                 bool(parameter.fixed),
                 float(parameter.value) if parameter.fixed else None,
+                parameter.kind is ParameterKind.DYNAMICS and not parameter.fixed,
             )
             for parameter in self.parameters
         )
@@ -559,18 +561,24 @@ class Minimizer:
 
         best_fval = float("inf")
         best_values = {name: float(minuit.values[name]) for name in names}
+        best_result = None
 
         def stage(label, method, **kwargs):
-            nonlocal best_fval, best_values
+            nonlocal best_fval, best_values, best_result
             self._log(f"{label} started")
             started = perf_counter()
             nfcn, ngrad = minuit.nfcn, minuit.ngrad
             nhessian = minuit.nhessian
             method(ncall=ncall, **kwargs)
             nonlocal_best = float(minuit.fval)
-            if np.isfinite(nonlocal_best) and nonlocal_best < best_fval:
+            if np.isfinite(nonlocal_best) and nonlocal_best <= best_fval:
                 best_fval = nonlocal_best
                 best_values = {name: float(minuit.values[name]) for name in names}
+                # Retain values, fval, validity and covariance together. Merely
+                # assigning minuit.values leaves its previous FMin in place
+                # until another minimization/HESSE recomputes it. The callbacks
+                # are functions, so deepcopy shares their compiled JAX closures.
+                best_result = deepcopy(minuit)
             self._log(
                 f"{label} finished in {perf_counter() - started:.3f} s: "
                 f"nfcn=+{minuit.nfcn - nfcn}, ngrad=+{minuit.ngrad - ngrad}, "
@@ -606,6 +614,12 @@ class Minimizer:
             if hesse:
                 stage("HESSE (restored)", minuit.hesse)
         polish_if_invalid()
+        if best_result is not None and (
+            not np.isfinite(float(minuit.fval)) or float(minuit.fval) > best_fval
+        ):
+            self._log("returning the best Minuit stage because the final "
+                      "continuation worsened the NLL or became non-finite")
+            return best_result
         return minuit
 
     def fit(

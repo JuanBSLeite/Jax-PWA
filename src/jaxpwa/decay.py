@@ -975,6 +975,9 @@ class DecayModel:
                 self.amplitude_model.components,
                 normalize_components=normalize_components,
                 has_efficiency=has_efficiency,
+                compact_data_kernel=self._compact_data_kernel(
+                    normalize_components=normalize_components,
+                ),
                 normalization_chunk_size=(
                     DEFAULT_NORMALIZATION_CHUNK_SIZE
                     if self.normalization_chunk_size == "auto"

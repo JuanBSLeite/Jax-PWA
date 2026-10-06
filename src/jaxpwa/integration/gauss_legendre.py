@@ -22,6 +22,7 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 import numpy as np
 
+from jaxpwa._quadrature import legendre_rule
 from jaxpwa.kinematics import PhaseSpaceSample
 
 
@@ -32,7 +33,7 @@ def _scaled_legendre(
 ) -> tuple[np.ndarray, np.ndarray]:
     """Return Gauss--Legendre nodes and weights scaled to ``[low, high]``."""
 
-    nodes, weights = np.polynomial.legendre.leggauss(order)
+    nodes, weights = legendre_rule(order)
     half = 0.5 * (high - low)
     mean = 0.5 * (high + low)
     return mean + half * nodes, half * weights

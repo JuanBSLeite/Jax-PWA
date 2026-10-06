@@ -111,10 +111,9 @@ def _normalize_component(
 
 def _component_scales(matrix: Array, normalization_mask: Array) -> Array:
     diagonal = jnp.real(jnp.diag(matrix))
-    if bool(jnp.any(diagonal <= 0.0)):
+    if bool(jnp.any(normalization_mask & (diagonal <= 0.0))):
         raise ValueError("Component normalization requires positive diagonal integrals")
-    normalized_scales = 1.0 / jnp.sqrt(diagonal)
-    return jnp.where(normalization_mask, normalized_scales, 1.0)
+    return 1.0 / jnp.sqrt(jnp.where(normalization_mask, diagonal, 1.0))
 
 
 def _component_scales_unchecked(
@@ -122,8 +121,8 @@ def _component_scales_unchecked(
     normalization_mask: Array,
 ) -> tuple[Array, Array]:
     diagonal = jnp.real(jnp.diag(matrix))
-    normalized_scales = 1.0 / jnp.sqrt(diagonal)
-    return jnp.where(normalization_mask, normalized_scales, 1.0), diagonal
+    scales = 1.0 / jnp.sqrt(jnp.where(normalization_mask, diagonal, 1.0))
+    return scales, diagonal
 
 
 def _prepare_component_data(
@@ -414,6 +413,7 @@ def _compact_prepare_kernel(
     normalize_components: bool,
     has_efficiency: bool,
     normalization_chunk_size: int = DEFAULT_NORMALIZATION_CHUNK_SIZE,
+    compact_data_kernel=None,
 ):
     """Compose normalization- and data-side coefficient-only programs."""
 
@@ -423,10 +423,12 @@ def _compact_prepare_kernel(
         has_efficiency=has_efficiency,
         chunk_size=normalization_chunk_size,
     )
-    data_kernel = _compact_data_kernel(
-        components,
-        normalize_components=normalize_components,
-    )
+    data_kernel = compact_data_kernel
+    if data_kernel is None:
+        data_kernel = _compact_data_kernel(
+            components,
+            normalize_components=normalize_components,
+        )
 
     def kernel(data, normalization_data, weights, efficiency):
         fixed_matrix, diagonal, scales = normalization_kernel(
@@ -615,6 +617,7 @@ class PreparedAmplitudeCache:
         normalize_components: bool,
         has_efficiency: bool,
         normalization_chunk_size: int = DEFAULT_NORMALIZATION_CHUNK_SIZE,
+        compact_data_kernel=None,
     ):
         """Build the reusable chunked coefficient-only prepare kernel."""
         return _compact_prepare_kernel(
@@ -622,6 +625,7 @@ class PreparedAmplitudeCache:
             normalize_components=bool(normalize_components),
             has_efficiency=bool(has_efficiency),
             normalization_chunk_size=int(normalization_chunk_size),
+            compact_data_kernel=compact_data_kernel,
         )
 
     @staticmethod
@@ -749,7 +753,10 @@ class PreparedAmplitudeCache:
                 weights,
                 efficiency,
             )
-            if bool(jnp.any(diagonal <= 0.0)):
+            flags = jnp.asarray(
+                _component_normalization_mask(components, normalize_components)
+            )
+            if bool(jnp.any(flags & (diagonal <= 0.0))):
                 raise ValueError(
                     "Component normalization requires positive diagonal integrals"
                 )
@@ -1188,8 +1195,8 @@ class PreparedAmplitudeCache:
         return not self.floating_dynamic_owners
 
     def check_parameters(self, parameters: Sequence[Parameter]) -> None:
-        """Raise if ``parameters`` disagrees with the fixed/floating DYNAMICS
-        split this cache was prepared with.
+        """Raise if ``parameters`` disagrees with the DYNAMICS bindings
+        this cache was prepared with.
 
         ``prepare()`` bakes each DYNAMICS parameter's fixed-vs-floating status
         into the compact-vs-dynamic evaluation path at prepare time: a fixed
@@ -1203,22 +1210,27 @@ class PreparedAmplitudeCache:
         treat it as a flat direction with no error raised. Call this before
         handing a parameter list to ``Minimizer`` whenever it is not the exact
         object passed to ``prepare()``.
+
+        Names, owners, backend aliases, fixed status and fixed values must
+        match for every dynamical parameter, even within an already-floating
+        component. Free starting values, bounds and optimizer steps may differ.
         """
-        incoming = frozenset(
-            p.owner
-            for p in parameters
-            if p.kind is ParameterKind.DYNAMICS and not p.fixed and p.owner is not None
-        )
-        if incoming == self.floating_dynamic_owners:
+        def bindings(items):
+            return {
+                (p.name, p.owner, p.backend_name or p.name,
+                 bool(p.fixed), float(p.value) if p.fixed else None)
+                for p in items if p.kind is ParameterKind.DYNAMICS
+            }
+
+        incoming = bindings(parameters)
+        prepared = bindings(self.parameters)
+        if incoming == prepared:
             return
-        stale_fixed = sorted(incoming - self.floating_dynamic_owners)
-        stale_floating = sorted(self.floating_dynamic_owners - incoming)
+        changed = sorted({binding[0] for binding in incoming ^ prepared})
         raise ValueError(
             "parameters are inconsistent with the dynamics this cache was "
-            "prepared with: components "
-            f"{stale_fixed} are floating in `parameters` but were fixed when "
-            f"this cache was prepared; components {stale_floating} are fixed "
-            "in `parameters` but were floating at prepare time. Rebuild the "
+            f"prepared with: changed dynamics bindings {changed} "
+            "(name, owner, backend alias, fixed status or fixed value). Rebuild the "
             "cache with PreparedAmplitudeCache.prepare(..., parameters=parameters) "
             "or pass the same parameter list used to prepare the cache to Minimizer."
         )
@@ -1597,14 +1609,18 @@ class PreparedAmplitudeCache:
             self.normalization_chunks,
         )
 
-    def _build_fraction_jacobian_kernel(self, parameter_names, quantity="fit_fractions"):
+    def _build_fraction_jacobian_kernel(
+        self, parameter_names, quantity="fit_fractions",
+    ):
         """Compile reusable sequential VJP rows without retaining sample arrays.
 
         ``quantity`` names the per-component cache method differentiated:
         ``"fit_fractions"`` or ``"component_intensities"``.
         """
         if quantity not in ("fit_fractions", "component_intensities"):
-            raise ValueError("quantity must be 'fit_fractions' or 'component_intensities'")
+            raise ValueError(
+                "quantity must be 'fit_fractions' or 'component_intensities'"
+            )
         components = self.components
         parameters = self.parameters
         normalize = self.normalize_components

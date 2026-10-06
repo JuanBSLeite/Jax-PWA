@@ -50,7 +50,10 @@ failed error matrix) that does not raise the NLL is returned with its invalid
 status, exactly as `method="minuit"` would return it: it is at least as good a
 point as the Nesterov endpoint, which has no EDM or covariance check of its
 own. Within Minuit, the best finite stage is restored if a later MIGRAD
-stage worsens the NLL. This prevents an unstable continuation from becoming
+stage, including the final polishing pass, worsens the NLL or becomes
+non-finite. A retained Minuit result preserves its values, NLL, validity and
+covariance together; resetting values alone would leave stale `FMin` metadata.
+This prevents an unstable continuation from becoming
 the reported fit, but it does not turn a non-converged Nesterov endpoint into
 a valid statistical minimum; inspect `result.valid`, NLL, EDM, and covariance.
 

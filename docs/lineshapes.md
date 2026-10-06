@@ -109,13 +109,17 @@ cot(delta_B) = 1/(a q) + r q/2.
 
 ```text
 K_ij(s) = [ sum_alpha g_i^alpha g_j^alpha/(m_alpha^2-s)
-          + f_ij^scatt (1-s0_scatt/s)/(s-s0_scatt) ] f_A0(s)
+          + f_ij^scatt (m_sq0-s0_scatt)/(s-s0_scatt) ] f_A0(s)
 
 P_j(s) = sum_alpha beta_alpha g_j^alpha/(m_alpha^2-s)
-       + f_1j^prod (1-s0_prod/s)/(s-s0_prod)
+       + f_1j^prod (m_sq0-s0_prod)/(s-s0_prod)
 
 F = (I - i K rho)^(-1) P.
 ```
+
+Here `m_sq0 = 1 GeV^2`. The numerator is constant in `s`, matching
+`KMatrix`'s `_slowly_varying_factor`; writing `1-s0/s` instead would reduce
+the whole factor to `1/s` and describe a different model.
 
 The scattering constants are fixed by default while the process-dependent `betas` and `f_prod` may be complex fit parameters. `scattering_amplitude()` and `s_matrix()` expose the coupled-channel `T` and `S` matrices for unitarity diagnostics.
 

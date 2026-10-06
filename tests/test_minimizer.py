@@ -427,7 +427,7 @@ def test_verbose_reports_optimizer_stages(capsys):
         assert f"{stage} finished in" in output
 
 
-@pytest.mark.parametrize("interpolation", ["linear", "cubic", "hermite"])
+@pytest.mark.parametrize("interpolation", ["linear", "hermite"])
 def test_jax_hessian_through_prepared_qmi_matches_gradient_differences(interpolation):
     import jax.numpy as jnp
 

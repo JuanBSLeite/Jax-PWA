@@ -12,6 +12,7 @@ import jax.numpy as jnp
 import numpy as np
 from jax import Array
 
+from jaxpwa._quadrature import legendre_rule
 from jaxpwa.dynamics.context import resolve_value
 
 Parameters = Mapping[str, object]
@@ -33,7 +34,7 @@ def _gauss_legendre_nodes(low: float, high: float, order: int) -> tuple[Array, A
         raise ValueError("integration interval requires low < high")
     if order < 2:
         raise ValueError("Gauss-Legendre order must be at least two")
-    nodes, weights = np.polynomial.legendre.leggauss(order)
+    nodes, weights = legendre_rule(order)
     scale = 0.5 * (high - low)
     shift = 0.5 * (high + low)
     return jnp.asarray(scale * nodes + shift), jnp.asarray(scale * weights)

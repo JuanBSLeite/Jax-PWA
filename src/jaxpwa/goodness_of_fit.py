@@ -49,7 +49,10 @@ def kdtree_local_residuals(observed_points, expected_points, expected_weights=No
     if weights.shape != (expected.shape[0],) or np.any(~np.isfinite(weights)) or np.any(weights < 0):
         raise ValueError("expected_weights must be finite and non-negative")
     tree_e, tree_o = cKDTree(expected), cKDTree(observed)
-    radii = np.atleast_1d(tree_e.query(observed, k=k)[0])[:, -1]
+    distances = tree_e.query(observed, k=k)[0]
+    # SciPy squeezes the neighbour axis for k=1, including when the reference
+    # sample itself contains only one point and caps the requested k above.
+    radii = np.asarray(distances) if k == 1 else distances[:, -1]
     observed_count = np.asarray([len(tree_o.query_ball_point(p, r)) for p, r in zip(observed, radii)], dtype=float)
     expected_count = np.asarray([weights[idx].sum() for p, r in zip(observed, radii) for idx in [tree_e.query_ball_point(p, r)]], dtype=float)
     expected_count *= observed.shape[0] / max(float(weights.sum()), np.finfo(float).tiny)

@@ -2,6 +2,44 @@
 
 Jax-PWA separates expensive one-time preparation from repeated likelihood evaluation. This distinction is especially important on GPUs, where recomputing resonance dynamics on a large normalization grid can dominate the fit even when the final coefficient algebra is small.
 
+## Reusing quadrature rules
+
+Gauss-Legendre users share a bounded host cache of the one-dimensional NumPy
+nodes and weights on `[-1, 1]`, keyed by order (up to 32 rules). This avoids
+repeating the same root calculation across adaptive mass segments, axes,
+models, discriminant PDFs and convolution setup. Cached arrays are read-only;
+interval scaling creates fresh arrays. Full grids and device buffers are not
+retained by this cache, and neither the nodes nor the integration measure changes.
+
+Run `benchmarks/benchmark_quadrature_preparation.py` with and without
+`--uncached` in fresh processes to compare first-use and repeated construction.
+The 2026-10-06 local GPU check reduced repeated construction of a million-point
+Square-Dalitz grid from about 117 ms to 15 ms, and of a 1,480,776-point adaptive
+mass grid from 585 ms to 107 ms. These are preparation timings, not faster
+likelihood evaluations; see [the review](reviews/20261006_package_audit.md)
+for scope and validation.
+
+## Avoiding repeated compilation
+
+Compact preparation and later data-only preparation on the same `DecayModel`
+share one data-side JIT function, including across efficiency-specific
+normalization wrappers. In the local five-component, 100,000-event benchmark,
+this reduced second-dataset preparation from 3.20 s to 28 ms by eliminating a
+duplicate compilation. Reuse the model and compatible array shapes/dtypes to
+benefit; the first preparation still compiles.
+
+For reuse across Python processes, JAX also supports an optional persistent
+compilation cache. Set `JAX_COMPILATION_CACHE_DIR` to a private directory before
+running the script, or configure `jax_compilation_cache_dir` before the first
+compilation. In two fresh local processes, the normalization/data compilation
+stages went from 2.68/2.37 s with an empty cache to 28/31 ms with a populated
+cache. Tracing, grid construction and execution remain separate costs.
+
+See the [NumPy and compilation review](reviews/20261006_numpy_compilation.md)
+for the full inventory, reproducible benchmarks, configuration example and
+remaining candidates. Persistent caching is optional and is not enabled
+globally by importing Jax-PWA.
+
 ## Prepared single-sample fits
 
 `FitSession` prepares a `PreparedAmplitudeCache` before repeated likelihood calls. For fixed resonance dynamics, the cache stores the component values on the data and the normalization matrix
@@ -205,6 +243,11 @@ full pull distribution.
 
 The shared lookup stores only a weak reference to the objective. A completed fit session can therefore be garbage-collected normally instead of being retained by the compilation cache.
 
+The backend key also distinguishes floating dynamics from coefficient-only
+parameters, since they require different Hessian memory schedules. Reusing the
+same objective and names with different parameter kinds cannot bypass the
+checkpointed, sequential-HVP path.
+
 The Minuit value and gradient callbacks also share the last evaluated parameter point, so requesting the value and gradient at the same point causes only one JAX device evaluation and one device-to-host transfer.
 
 `Minimizer(..., hessian="jax")` (or `session.fit(hessian="jax")`) adds an
@@ -367,6 +410,18 @@ along that direction instead of a small one — the value simply never reaches t
 cache's compact evaluation path. Call `cache.check_parameters(parameters)` before
 constructing `Minimizer` whenever the two parameter lists are not obviously the
 same object.
+
+The check compares every dynamics binding: public name, owner, backend alias,
+fixed status and fixed value. Comparing only floating component owners is
+insufficient: renaming or adding a parameter on an already-floating component
+can also produce an ignored fit direction. Free starting values, bounds and
+optimizer steps may change without rebuilding the cache.
+
+A component with `normalize_component=False` may have a zero integral without
+being rescaled; the compact cache accepts it and keeps its zero matrix row and
+column. A component requesting unit-integral normalization still requires a
+positive diagonal integral. A valid total PDF must of course have nonzero
+normalization.
 
 ### Memory-aware normalization chunks (`normalization_chunk_size="auto"`)
 

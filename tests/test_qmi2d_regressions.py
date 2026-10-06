@@ -9,9 +9,8 @@ from jaxpwa.dynamics.qmi2d import _catmull_rom
 enable_x64()
 
 
-@pytest.mark.parametrize("mode", ["none"])
 @pytest.mark.parametrize("phase", [False, True])
-def test_inactive_cell_rejects_free_nodes(mode, phase):
+def test_inactive_cell_rejects_free_nodes(phase):
     free = Parameter.dynamics("dead", 1.0, owner="q")
     grid = ((1.0, free), (1.0, 1.0))
     fixed = ((1.0, 1.0), (1.0, 1.0))
@@ -21,7 +20,7 @@ def test_inactive_cell_rejects_free_nodes(mode, phase):
             (0.0, 1.0, 2.0),
             fixed if phase else grid,
             grid if phase else fixed,
-            interpolation=mode,
+            interpolation="none",
             active_mask=((True, False), (True, True)),
         )
     QMI2D(
@@ -29,7 +28,7 @@ def test_inactive_cell_rejects_free_nodes(mode, phase):
         (0.0, 1.0, 2.0),
         ((1.0, Parameter("fixed", 1.0, fixed=True)), (1.0, 1.0)),
         fixed,
-        interpolation=mode,
+        interpolation="none",
         active_mask=((True, False), (True, True)),
     )
 
