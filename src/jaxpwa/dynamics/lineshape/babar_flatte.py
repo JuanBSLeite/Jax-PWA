@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from ...particle_properties import mass_gev
 from ..context import ResonanceContext
 
 
@@ -20,17 +21,24 @@ class BaBarFlatte:
 
     with ``rho(h h) = sqrt(1 - 4 m_h^2 / m^2)`` analytically continued below
     threshold. The defaults are the BES couplings used by BaBar,
-    ``g_pi = 0.165 GeV`` and ``g_K = 4.21*g_pi``.
+    ``g_pi = 0.165 GeV`` and ``g_K = 4.21*g_pi``. Daughter masses left at
+    ``None`` (default) are taken from the PDG table of the ``particle``
+    package.
     """
 
     g_pi: float = 0.165
     g_k: float = 4.21 * 0.165
-    mpi0: float = 0.1349768
-    mpip: float = 0.13957039
-    mkp: float = 0.493677
-    mk0: float = 0.497611
+    mpi0: float | None = None
+    mpip: float | None = None
+    mkp: float | None = None
+    mk0: float | None = None
 
     def __post_init__(self) -> None:
+        for field_name, particle in (
+            ("mpi0", "pi0"), ("mpip", "pi+"), ("mkp", "K+"), ("mk0", "K0"),
+        ):
+            if getattr(self, field_name) is None:
+                object.__setattr__(self, field_name, mass_gev(particle))
         if self.g_pi < 0.0 or self.g_k < 0.0:
             raise ValueError("BaBarFlatte couplings must be non-negative")
         if min(self.mpi0, self.mpip, self.mkp, self.mk0) <= 0.0:

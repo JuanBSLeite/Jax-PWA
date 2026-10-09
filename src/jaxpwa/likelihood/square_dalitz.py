@@ -14,29 +14,44 @@ from jaxpwa.kinematics.square_dalitz import (
 )
 
 
-def square_dalitz_log_jacobian(model, data) -> Array:
+def square_dalitz_pair(model, pair=None) -> tuple[int, int]:
+    """The ordered daughter pair defining ``(m', theta')`` for ``model``.
+
+    An explicit ``pair`` wins; otherwise a ``square-dalitz``-normalized model
+    supplies its ``normalization_pair``. Any other model needs ``pair``.
+    """
+    if pair is not None:
+        pair = tuple(int(index) for index in pair)
+        if len(pair) != 2 or pair[0] == pair[1] or not set(pair) <= {0, 1, 2}:
+            raise ValueError(
+                "square_dalitz_pair must contain two distinct indices from 0, 1, 2"
+            )
+        return pair
+    if getattr(model, "normalization_method", None) == "square-dalitz":
+        return tuple(model.normalization_pair)
+    raise ValueError(
+        "Square-Dalitz coordinates need the ordered daughter pair defining m': pass "
+        "square_dalitz_pair=(i, j), or use a model with normalization_method="
+        "'square-dalitz', whose normalization_pair is then used"
+    )
+
+
+def square_dalitz_log_jacobian(model, data, *, pair=None) -> Array:
     r"""Per-event ``log |J(m', theta')|`` of ``model``'s Square-Dalitz map.
 
-    ``|J|`` is the Jacobian of ``(m', theta') -> (s_a, s_b)`` for the
-    model's ``normalization_pair`` (the same map its Square-Dalitz
-    normalization integrates over), evaluated at the events of ``data``
-    (a ``PhaseSpaceSample`` or a mapping with ``s12``, ``s13``, ``s23``).
-    A density in ``(m', theta')`` is the Dalitz-plot density times ``|J|``.
-
-    The model must use ``normalization_method="square-dalitz"``. Events on or
-    outside the Square-Dalitz boundary (``|J| = 0``) raise ``ValueError``.
+    ``|J|`` is the Jacobian of ``(m', theta') -> (s_a, s_b)`` for the ordered
+    daughter ``pair`` (default: the ``normalization_pair`` of a
+    ``square-dalitz``-normalized model, see :func:`square_dalitz_pair`),
+    evaluated at the events of ``data`` (a ``PhaseSpaceSample`` or a mapping
+    with ``s12``, ``s13``, ``s23``). A density in ``(m', theta')`` is the
+    Dalitz-plot density times ``|J|``. Events on or outside the Square-Dalitz
+    boundary (``|J| = 0``) raise ``ValueError``.
     """
-    if getattr(model, "normalization_method", None) != "square-dalitz":
-        raise ValueError(
-            "Square-Dalitz coordinates require a model built with "
-            "normalization_method='square-dalitz': its normalization pair defines "
-            "(m', theta') and its quadrature integrates over the unit square"
-        )
+    pair = square_dalitz_pair(model, pair)
     values = data.as_dict() if hasattr(data, "as_dict") else data
     channel = model.channel
     mother_mass = float(channel.parent_mass)
     masses = tuple(float(m) for m in channel.daughter_masses)
-    pair = tuple(model.normalization_pair)
     mprime, thetaprime = invariants_to_square_dalitz(
         values["s12"],
         values["s13"],
@@ -90,7 +105,7 @@ COORDINATES = ("dalitz", "square-dalitz")
 
 
 def validate_session_coordinates(
-    coordinates, *, models, efficiencies=(), background_shapes=()
+    coordinates, *, models, efficiencies=(), background_shapes=(), pair=None
 ):
     """Check a session's ``coordinates`` and, for Square-Dalitz, its inputs.
 
@@ -106,6 +121,10 @@ def validate_session_coordinates(
             f"coordinates must be one of {COORDINATES}, got {coordinates!r}"
         )
     if coordinates == "dalitz":
+        if pair is not None:
+            raise ValueError(
+                "square_dalitz_pair is only used with coordinates='square-dalitz'"
+            )
         return
     from jaxpwa.square_histograms import (
         SquareDalitzHistogramBackground,
@@ -113,9 +132,7 @@ def validate_session_coordinates(
     )
 
     for model in models:
-        square_dalitz_log_jacobian(
-            model, {"s12": jnp.zeros(0), "s13": jnp.zeros(0), "s23": jnp.zeros(0)}
-        )
+        square_dalitz_pair(model, pair)
     for efficiency in efficiencies:
         if (
             isinstance(efficiency, SquareDalitzHistogramEfficiency)
@@ -139,4 +156,4 @@ def validate_session_coordinates(
             )
 
 
-__all__ = ["SquareDalitzNLL", "square_dalitz_log_jacobian"]
+__all__ = ["SquareDalitzNLL", "square_dalitz_log_jacobian", "square_dalitz_pair"]

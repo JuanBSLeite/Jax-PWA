@@ -330,13 +330,15 @@ class FitSession:
     normalization samples.
 
     ``coordinates="square-dalitz"`` fits the events as points of the
-    Square-Dalitz plane ``(m', theta')`` of the model's ``normalization_pair``
-    instead of ``(s_a, s_b)``: every event density is per ``dm' dtheta'`` and
-    normalized over the unit square, i.e. the NLL becomes
-    :class:`~jaxpwa.SquareDalitzNLL` of the Dalitz-plot one. The model must
-    use ``normalization_method="square-dalitz"``. The Jacobian is
-    parameter-independent, so fitted values and errors are those of the
-    Dalitz-plot fit; only the NLL value changes. Efficiencies stay
+    Square-Dalitz plane ``(m', theta')`` of the ordered daughter pair
+    ``square_dalitz_pair`` instead of ``(s_a, s_b)``: every event density is
+    per ``dm' dtheta'``, i.e. the NLL becomes :class:`~jaxpwa.SquareDalitzNLL`
+    of the Dalitz-plot one. The normalization integral is the same in any
+    coordinates, so any normalization method works; ``square_dalitz_pair``
+    defaults to the ``normalization_pair`` of a ``square-dalitz``-normalized
+    model and is required otherwise. The Jacobian is parameter-independent,
+    so fitted values and errors are those of the Dalitz-plot fit; only the NLL
+    value changes. Efficiencies stay
     dimensionless and background shapes stay Dalitz-plot densities
     (Square-Dalitz histogram backgrounds with ``divide_jacobian=True``),
     which is checked on construction.
@@ -352,10 +354,12 @@ class FitSession:
     signal_yield: object | None = None
     constraints: tuple[object, ...] = ()
     coordinates: str = "dalitz"
+    square_dalitz_pair: tuple[int, int] | None = None
 
     def __post_init__(self) -> None:
         validate_session_coordinates(
             self.coordinates,
+            pair=self.square_dalitz_pair,
             models=(self.model,),
             efficiencies=(self.efficiency,),
             background_shapes=tuple(
@@ -378,6 +382,7 @@ class FitSession:
         signal_yield: object | None = None,
         constraints: Sequence[object] = (),
         coordinates: str = "dalitz",
+        square_dalitz_pair: tuple[int, int] | None = None,
         **root_kwargs,
     ) -> "FitSession":
         """Build a `FitSession` reading its data sample from a ROOT tree.
@@ -397,6 +402,7 @@ class FitSession:
             signal_yield=signal_yield,
             constraints=tuple(constraints),
             coordinates=coordinates,
+            square_dalitz_pair=square_dalitz_pair,
         )
 
     def with_efficiency(self, efficiency: object | None) -> "FitSession":
@@ -649,7 +655,9 @@ class FitSession:
         """Wrap an event NLL for this session's ``coordinates``."""
         if self.coordinates == "dalitz":
             return nll
-        log_jacobian = square_dalitz_log_jacobian(self.model, self.data)
+        log_jacobian = square_dalitz_log_jacobian(
+            self.model, self.data, pair=self.square_dalitz_pair
+        )
         if weights is not None:
             log_jacobian = jnp.asarray(weights) * log_jacobian
         return SquareDalitzNLL(nll, jnp.sum(log_jacobian))

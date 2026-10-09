@@ -21,6 +21,30 @@ PolarFormFactorSymNR(...)
 
 One-dimensional isobar dynamics use the ordinary `lineshape(mass, context)` interface through `Resonance`. A genuinely two-dimensional Dalitz amplitude such as `QMIPixel` or `PolarFormFactorSymNR` is attached through `DalitzAmplitude` because it depends simultaneously on two invariant-mass-squared coordinates.
 
+### Particle masses come from the PDG table
+
+No lineshape hard-codes a particle mass. Final-state and resonance masses that a
+lineshape needs internally default to `None` and are resolved, when the object is
+constructed, from the PDG table of the `particle` package
+(`jaxpwa.particle_properties.mass_gev`/`width_gev`):
+
+| Class | Fields | PDG particles |
+|---|---|---|
+| `Rescattering2`, `PipiKKRescattering` | `kaon_mass` | `K+` |
+| `BaBarFlatte` | `mpi0`, `mpip`, `mkp`, `mk0` | `pi0`, `pi+`, `K+`, `K0` |
+| `Flatte.f0_980()` etc. (presets) | channel masses | `pi0`, `pi+`, `K+`, `K0`, `eta`, `eta'(958)` |
+| `KMatrix` | `pion_mass`, `kaon_mass`, `eta_mass`, `eta_prime_mass` | `pi+`, `K+`, `eta`, `eta'(958)` |
+| `RhoOmegaMixing` | `rho_mass`, `rho_width`, `omega_mass`, `omega_width` | `rho(770)0`, `omega(782)` |
+
+An explicit value overrides the lookup, e.g. to reproduce a publication that used
+other numbers (e.g. the former literal defaults, `PipiKKRescattering(kaon_mass=0.494)`
+or `RhoOmegaMixing(rho_mass=0.77526, rho_width=0.1491, omega_mass=0.78265,
+omega_width=0.00849)`).
+Resolution happens once per object, so a table pinned with `Particle.load_table(...)`
+applies to objects built after it. Saved models store the resolved numbers.
+Model parameters that are not particle properties (the Laura++/BES pole masses of the
+Flatte presets, the K-matrix bare poles, `Rescattering2.transition_mass`) are unchanged.
+
 ## Relativistic Breit-Wigner
 
 ```text

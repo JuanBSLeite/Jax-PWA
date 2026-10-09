@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from ...particle_properties import mass_gev
 from ..context import ResonanceContext
 
 
@@ -46,7 +47,9 @@ class Rescattering2:
     ``resAmp``'s ``phi00(...) * pi/180``. The default coefficients are those
     hard-coded in Laura++, including the ``1/(1+m^2/Lambda^2)`` suppression
     with ``Lambda = 1`` GeV. The first interval starts at the charged-kaon
-    threshold, 2*m_K, and the second ends at 2.0 GeV.
+    threshold, 2*m_K, and the second ends at 2.0 GeV. ``kaon_mass=None``
+    (default) takes the charged-kaon mass from the PDG table of the
+    ``particle`` package.
 
     The Laura++ source appears to contain a typo in initialise(): C0 and F0
     are formed from phi00(sqr_tmax[1]*sqr_tmax[1], 1) and
@@ -79,12 +82,14 @@ class Rescattering2:
 
     lambda_scale: float = 1.0
 
-    kaon_mass: float = 0.493677
+    kaon_mass: float | None = None
     transition_mass: float = 1.47
     maximum_mass: float = 2.0
     threshold_phase_degrees: float = 226.5
 
     def __post_init__(self) -> None:
+        if self.kaon_mass is None:
+            object.__setattr__(self, "kaon_mass", mass_gev("K+"))
         threshold = 2.0 * float(self.kaon_mass)
         if threshold >= float(self.transition_mass):
             raise ValueError(

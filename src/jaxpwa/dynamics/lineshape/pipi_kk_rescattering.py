@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from ...particle_properties import mass_gev
 from ..context import ResonanceContext
 
 
@@ -42,13 +43,17 @@ class PipiKKRescattering:
     NaN is not convention-specific) but does not apply the eta0=1 override,
     since that is a Laura++ implementation choice absent from the printed
     equations.
+
+    ``kaon_mass=None`` (default) takes the charged-kaon mass from the PDG
+    table of the ``particle`` package, as Laura++ does with
+    ``LauConstants::mK``.
     """
 
     mass_min: float = 1.0
     mass_max: float = 1.5
     delta_pipi_squared: float = 1.0
     delta_kk_squared: float = 1.0
-    kaon_mass: float = 0.494
+    kaon_mass: float | None = None
     epsilon1: float = 2.4
     epsilon2: float = -5.5
     m_prime: float = 1.5
@@ -58,6 +63,8 @@ class PipiKKRescattering:
     convention: str = "paper"
 
     def __post_init__(self) -> None:
+        if self.kaon_mass is None:
+            object.__setattr__(self, "kaon_mass", mass_gev("K+"))
         if self.convention not in {"paper", "laura"}:
             raise ValueError("rescattering convention must be 'paper' or 'laura'")
         if self.mass_min >= self.mass_max:

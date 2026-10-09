@@ -146,14 +146,17 @@ class CPFitSession:
     constraints: tuple[object, ...] = ()
     plus_event_weights: object | None = None
     minus_event_weights: object | None = None
-    # "square-dalitz": fit B+/B- events as points of each model's Square-Dalitz
-    # plane (m', theta'); see FitSession and SquareDalitzNLL. The joint B+/B-
-    # normalization is unchanged.
+    # "square-dalitz": fit B+/B- events as points of the Square-Dalitz plane
+    # (m', theta') of square_dalitz_pair (default: the normalization_pair of
+    # square-dalitz-normalized models); see FitSession and SquareDalitzNLL. The
+    # joint B+/B- normalization is unchanged.
     coordinates: str = "dalitz"
+    square_dalitz_pair: tuple[int, int] | None = None
 
     def __post_init__(self):
         validate_session_coordinates(
             self.coordinates,
+            pair=self.square_dalitz_pair,
             models=(self.plus_model, self.minus_model),
             efficiencies=(self.plus_efficiency, self.minus_efficiency),
             background_shapes=tuple(
@@ -309,7 +312,9 @@ class CPFitSession:
         for index, (model, data) in enumerate(
             ((self.plus_model, self.plus_data), (self.minus_model, self.minus_data))
         ):
-            log_jacobian = square_dalitz_log_jacobian(model, data)
+            log_jacobian = square_dalitz_log_jacobian(
+                model, data, pair=self.square_dalitz_pair
+            )
             if weights is not None:
                 log_jacobian = jnp.asarray(weights[index]) * log_jacobian
             total = total + jnp.sum(log_jacobian)

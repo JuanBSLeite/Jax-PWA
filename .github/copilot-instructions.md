@@ -94,7 +94,7 @@ uncertainty reporting without a separate Hessian calculation.
 plus `sympy.py`'s `SympyLineshape` for user-written symbolic lineshapes via the optional `sympy`
 extra) combined with an angular factor (`dynamics/angular.py`) and Blatt-Weisskopf
 barriers. `DalitzAmplitude` bypasses that isobar construction entirely for amplitudes that are
-intrinsically two-dimensional (`QMIPixel`, `dynamics/qmi_pixel.py`), evaluated directly over
+intrinsically two-dimensional (`QMIPixel`, `dynamics/lineshape/qmi_pixel.py`), evaluated directly over
 `(s12, s13)`.
 
 `QMI`'s `interpolation="cubic"` is not a cubic spline in the usual sense: it is a strictly local

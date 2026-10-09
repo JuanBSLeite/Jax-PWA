@@ -85,8 +85,9 @@ PhaseSpaceSample (data or generated)
 
 `FitSession`/`CPFitSession(coordinates="square-dalitz")` fit the events as points of `(m', theta')`
 (`SquareDalitzNLL`): every event density gains the parameter-independent Jacobian, so fitted values
-and errors equal the Dalitz-plot fit and only the NLL value changes. It requires
-`normalization_method="square-dalitz"` and is exact for mixtures only because efficiencies are
+and errors equal the Dalitz-plot fit and only the NLL value changes. Any normalization method
+works (`square_dalitz_pair` names the pair defining `m'`, defaulting to the `normalization_pair`
+of a Square-Dalitz-normalized model). It is exact for mixtures only because efficiencies are
 dimensionless and background shapes are Dalitz-plot densities (Square-Dalitz histogram backgrounds
 with `divide_jacobian=True`); the sessions enforce this. `QMIPixel(coordinates="square-dalitz")` is
 independent: it puts the pixel grid itself on `(m', theta')`. See `docs/square_dalitz.md`.
@@ -115,8 +116,8 @@ uncertainty reporting without a separate Hessian calculation.
 plus `sympy.py`'s `SympyLineshape` for user-written symbolic lineshapes via the optional `sympy`
 extra) combined with an angular factor (`dynamics/angular.py`, default `CovariantAngular`) and
 Blatt-Weisskopf barriers. `DalitzAmplitude` bypasses that isobar construction entirely for
-amplitudes that are intrinsically two-dimensional (`QMIPixel`, `dynamics/qmi_pixel.py`;
-`PolarFormFactorSymNR`, `dynamics/polar_form_factor_nr.py`, the Laura++ symmetrized polar
+amplitudes that are intrinsically two-dimensional (`QMIPixel`, `dynamics/lineshape/qmi_pixel.py`;
+`PolarFormFactorSymNR`, `dynamics/lineshape/polar_form_factor_nr.py`, the Laura++ symmetrized polar
 form-factor non-resonant term), evaluated directly over `(s12, s13)`.
 
 `KMatrix` (`kmatrix.py`) returns the pi-pi channel (row 0 of `(I - i K rho)^-1 P`); a fit

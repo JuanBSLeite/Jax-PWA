@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 from jaxpwa import QMIPixel, Parameter, enable_x64, physical_bin_mask
-from jaxpwa.dynamics.qmi_pixel import _catmull_rom
+from jaxpwa.dynamics.lineshape.qmi_pixel import _catmull_rom
 
 enable_x64()
 

@@ -71,7 +71,9 @@ def test_rescattering_laura_complex_reference_values():
         -0.0437459779265945j,
         0.004947864569887254 - 0.002740883023572237j,
     ])
-    actual = PipiKKRescattering(convention="laura")(mass, _context())
+    # The reference values were computed with kaon_mass=0.494 (the former
+    # default); the class now defaults to the PDG K+ mass.
+    actual = PipiKKRescattering(convention="laura", kaon_mass=0.494)(mass, _context())
     assert jnp.allclose(actual, expected, rtol=1e-12, atol=1e-14)
 
 

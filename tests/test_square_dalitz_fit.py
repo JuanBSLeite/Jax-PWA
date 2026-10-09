@@ -182,6 +182,22 @@ def test_single_sample_fit_is_the_same_in_square_dalitz_coordinates():
     )
 
 
+def test_fit_with_non_square_dalitz_normalization_and_explicit_pair():
+    """Square-Dalitz coordinates with a Gauss-Legendre (mass-plane) normalization."""
+    model = _single_model(method="gauss-legendre")
+    data = _toy(_single_model(), 1500, seed=1)
+    start = {"nr.x": 0.5, "nr.y": -0.2}
+    dalitz = FitSession(model, data).fit(dict(start), strategy=1, hessian="jax")
+    square = FitSession(
+        model, data, coordinates="square-dalitz", square_dalitz_pair=PAIR
+    ).fit(dict(start), strategy=1, hessian="jax")
+    _assert_same_fit(
+        dalitz,
+        square,
+        float(jnp.sum(square_dalitz_log_jacobian(model, data, pair=PAIR))),
+    )
+
+
 def test_qmi_objective_differs_only_by_the_jacobian_term():
     knots = (0.28, 0.6, 1.0, 1.6, 3.0, 5.14)
     nodes = [
@@ -354,9 +370,18 @@ def test_square_dalitz_coordinates_reject_inconsistent_inputs():
     data = _single_model().generate_phase_space(50, seed=1, include_momenta=False)
     with pytest.raises(ValueError, match="coordinates must be one of"):
         FitSession(_single_model(), data, coordinates="polar")
-    with pytest.raises(ValueError, match="normalization_method='square-dalitz'"):
+    with pytest.raises(ValueError, match="square_dalitz_pair=\\(i, j\\)"):
         FitSession(
             _single_model(method="gauss-legendre"), data, coordinates="square-dalitz"
+        )
+    with pytest.raises(ValueError, match="only used with"):
+        FitSession(_single_model(), data, square_dalitz_pair=PAIR)
+    with pytest.raises(ValueError, match="two distinct indices"):
+        FitSession(
+            _single_model(),
+            data,
+            coordinates="square-dalitz",
+            square_dalitz_pair=(1, 1),
         )
     edges = (0.0, 0.5, 1.0)
     background = SquareDalitzHistogramBackground(

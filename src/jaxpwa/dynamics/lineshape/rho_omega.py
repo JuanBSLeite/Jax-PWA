@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 
 import jax.numpy as jnp
 
+from ...particle_properties import mass_gev, width_gev
 from ..context import ResonanceContext
 from .gounaris_sakurai import GounarisSakurai
 
@@ -22,16 +23,28 @@ class RhoOmegaMixing:
     class returns ``Rrho / denominator`` for ``component='rho'`` and
     ``Delta * Rrho * Romega / denominator`` for ``component='omega'``.  The
     published Cartesian coefficients then multiply the two shapes separately.
+
+    Masses and widths left at ``None`` (default) are the PDG values of
+    ``rho(770)0`` and ``omega(782)`` from the ``particle`` package; pass them
+    explicitly to reproduce a publication that used other values.
     """
 
     component: str = "rho"
-    rho_mass: float = 0.77526
-    rho_width: float = 0.1491
-    omega_mass: float = 0.78265
-    omega_width: float = 0.00849
+    rho_mass: float | None = None
+    rho_width: float | None = None
+    omega_mass: float | None = None
+    omega_width: float | None = None
     mixing_delta: float = 0.00215
 
     def __post_init__(self) -> None:
+        for field_name, lookup, particle in (
+            ("rho_mass", mass_gev, "rho(770)0"),
+            ("rho_width", width_gev, "rho(770)0"),
+            ("omega_mass", mass_gev, "omega(782)"),
+            ("omega_width", width_gev, "omega(782)"),
+        ):
+            if getattr(self, field_name) is None:
+                object.__setattr__(self, field_name, lookup(particle))
         if self.component not in {"rho", "omega"}:
             raise ValueError("RhoOmegaMixing component must be 'rho' or 'omega'")
 
