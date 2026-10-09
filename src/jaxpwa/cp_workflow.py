@@ -30,6 +30,11 @@ from jaxpwa.kinematics import (
     invariants_to_square_dalitz,
 )
 from jaxpwa.likelihood import CPJointNLL
+from jaxpwa.likelihood.square_dalitz import (
+    SquareDalitzNLL,
+    square_dalitz_log_jacobian,
+    validate_session_coordinates,
+)
 from jaxpwa.likelihood.cp import _signal_yield_pair
 from jaxpwa.observables.errors import _covariance_matrix
 from jaxpwa.plotting import _draw_pulls_1d, plot_binned_data
@@ -141,8 +146,25 @@ class CPFitSession:
     constraints: tuple[object, ...] = ()
     plus_event_weights: object | None = None
     minus_event_weights: object | None = None
+    # "square-dalitz": fit B+/B- events as points of each model's Square-Dalitz
+    # plane (m', theta'); see FitSession and SquareDalitzNLL. The joint B+/B-
+    # normalization is unchanged.
+    coordinates: str = "dalitz"
 
     def __post_init__(self):
+        validate_session_coordinates(
+            self.coordinates,
+            models=(self.plus_model, self.minus_model),
+            efficiencies=(self.plus_efficiency, self.minus_efficiency),
+            background_shapes=tuple(
+                shape
+                for background in self.backgrounds
+                for shape in (
+                    getattr(background, "plus_shape", None),
+                    getattr(background, "minus_shape", None),
+                )
+            ),
+        )
         if self.event_weights is not None and (
             self.backgrounds or self.extended or self.signal_fraction is not None
             or self.signal_yield is not None
@@ -279,9 +301,24 @@ class CPFitSession:
             return self._weighted_nll(self.event_weights)
         return CPJointNLL(self.plus_cache, self.minus_cache, plus_efficiency=self.plus_acceptance_data, minus_efficiency=self.minus_acceptance_data, background_categories=self.background_categories, signal_fraction=self.signal_fraction, extended=self.extended, signal_yield=self.signal_yield)
 
+    def _in_coordinates(self, nll, weights=None):
+        """Wrap a joint event NLL for this session's ``coordinates``."""
+        if self.coordinates == "dalitz":
+            return nll
+        total = 0.0
+        for index, (model, data) in enumerate(
+            ((self.plus_model, self.plus_data), (self.minus_model, self.minus_data))
+        ):
+            log_jacobian = square_dalitz_log_jacobian(model, data)
+            if weights is not None:
+                log_jacobian = jnp.asarray(weights[index]) * log_jacobian
+            total = total + jnp.sum(log_jacobian)
+        return SquareDalitzNLL(nll, total)
+
     @cached_property
     def objective(self):
-        return ConstrainedNLL(self.base_objective, *self.constraints) if self.constraints else self.base_objective
+        nll = self._in_coordinates(self.base_objective, self.event_weights)
+        return ConstrainedNLL(nll, *self.constraints) if self.constraints else nll
 
     def _split_weights(self, weights):
         """Validate ``weights=(plus_weights, minus_weights)`` against the data."""
@@ -313,7 +350,9 @@ class CPFitSession:
 
     def _weighted_objective(self, weights):
         """Weighted joint NLL plus this session's constraints."""
-        nll = self._weighted_nll(weights)
+        nll = self._in_coordinates(
+            self._weighted_nll(weights), self._split_weights(weights)
+        )
         return ConstrainedNLL(nll, *self.constraints) if self.constraints else nll
 
     def _score_outer_objective(self, weights, reference_parameters):

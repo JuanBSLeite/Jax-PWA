@@ -7,7 +7,7 @@ dynamics/
   angular.py
   context.py
   resonance.py
-  qmi2d.py
+  qmi_pixel.py
   lineshape/
     __init__.py
     common.py
@@ -99,7 +99,7 @@ coefficients; if pole masses or radii float, that transformation itself varies
 with those parameters. Model JSON export/import preserves the option; older
 specifications without it keep the default `True`.
 
-`QMI2D` remains at the `dynamics` level because it is a full two-dimensional Dalitz amplitude evaluated through `DalitzAmplitude`, rather than a one-dimensional `lineshape(mass, context)` plugin used by `Resonance`.
+`QMIPixel` remains at the `dynamics` level because it is a full two-dimensional Dalitz amplitude evaluated through `DalitzAmplitude`, rather than a one-dimensional `lineshape(mass, context)` plugin used by `Resonance`.
 
 `lineshape/sympy.py` provides the optional `SympyLineshape` adapter. It uses the
 same callable interface and parameter-resolution hooks; existing plugins and

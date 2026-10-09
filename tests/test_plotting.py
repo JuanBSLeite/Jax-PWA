@@ -100,7 +100,7 @@ def test_plot_dalitz_folded_matches_pre_folded_data():
     x_edges = ax1.collections[0].get_coordinates()[0, :, 0]
     y_edges = ax1.collections[0].get_coordinates()[:, 0, 1]
     # folded=True must force identical bin edges on both axes -- the same
-    # x_edges==y_edges convention `HistogramEfficiency`/`QMI2D(folded=True)`
+    # x_edges==y_edges convention `HistogramEfficiency`/`QMIPixel(folded=True)`
     # require -- otherwise the two axes autoscale independently and skew the
     # physical x==y fold boundary.
     assert np.allclose(x_edges, y_edges)

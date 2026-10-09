@@ -60,7 +60,6 @@ from ..decay import DalitzAmplitude, DecayChannel, DecayModel, NonResonant, Reso
 from ..dynamics import (
     LASS,
     QMI,
-    QMI2D,
     BaBarFlatte,
     CovariantAngular,
     Flatte,
@@ -70,6 +69,7 @@ from ..dynamics import (
     PipiKKRescattering,
     PolarFormFactorSymNR,
     Pole,
+    QMIPixel,
     RelativisticBreitWigner,
     Rescattering2,
     RhoOmegaMixing,
@@ -118,12 +118,15 @@ _REGISTRY: dict[str, type] = {
         ZemachP,
         ZemachPstar,
         GooFitLegacyAngular,
-        QMI2D,
+        QMIPixel,
         PolarFormFactorSymNR,
         RealImag,
         CPRealImag,
     )
 }
+# Former class names still accepted on load, so specs saved before a rename keep loading.
+# Export always writes the current name (`_registered_name` checks `cls.__name__`).
+_LEGACY_TYPE_NAMES: dict[str, type] = {"QMI2D": QMIPixel}
 
 _DECAY_MODEL_SCALAR_KWARGS = (
     "normalize_components",
@@ -213,7 +216,7 @@ def _decode(value: object, registry: dict[str, Parameter]) -> object:
         if set(value.keys()) == {"parameter"}:
             return _decode_parameter(value["parameter"], registry)
         if "type" in value:
-            cls = _REGISTRY.get(value["type"])
+            cls = _REGISTRY.get(value["type"]) or _LEGACY_TYPE_NAMES.get(value["type"])
             if cls is None:
                 raise ValueError(f"unknown component/plugin type {value['type']!r}")
             if "fields" not in value:

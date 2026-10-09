@@ -112,6 +112,55 @@ m_13 = m(K+ pi-).
 The Square-Dalitz sample can be used consistently for both individual-component
 and total-PDF normalization.
 
+## Fitting in Square-Dalitz coordinates
+
+`FitSession(..., coordinates="square-dalitz")` and `CPFitSession(..., coordinates="square-dalitz")`
+fit the events as points of the Square-Dalitz plane `(m', theta')` of the model's
+`normalization_pair` instead of `(s_a, s_b)`. Every event density is then per `dm' dtheta'`,
+normalized over the unit square:
+
+```text
+p_square(m', theta') = |A|^2 eps |J| / integral_0^1 integral_0^1 |A|^2 eps |J| dm' dtheta'
+                     = p_dalitz(s_a, s_b) |J(m', theta')| .
+```
+
+The denominator is exactly what `normalization_method="square-dalitz"` integrates, so the model
+must use it (the session raises otherwise). Because `|J|` does not depend on the fit parameters,
+the NLL becomes
+
+```text
+NLL_square(theta) = NLL_dalitz(theta) - sum_i w_i log |J_i|
+```
+
+(`w_i = 1` unless the fit is event-weighted), which is what `SquareDalitzNLL` computes;
+`square_dalitz_log_jacobian(model, sample)` returns the per-event `log |J_i|`. Fitted values,
+HESSE errors, covariances (including the weighted sandwich/SumW2 corrections) and pulls are
+therefore identical to the Dalitz-plot fit; only the NLL value changes. For CP fits the B+ and B-
+terms are added and the joint B+/B- normalization is unchanged.
+
+**Efficiencies and backgrounds.** The equality above holds for mixtures only if every component
+gains the same `|J|`:
+
+- an efficiency is a dimensionless probability, the same in either coordinates. A
+  `SquareDalitzHistogramEfficiency` must keep `divide_jacobian=False` (rejected otherwise);
+- a background shape is always interpreted as a density in the ordinary Dalitz measure,
+  normalized by `integral b ds_a ds_b`. A Square-Dalitz histogram is naturally a density per
+  `dm' dtheta'`, so a `SquareDalitzHistogramBackground` must set `divide_jacobian=True`
+  (`b / |J|`, whose Dalitz-plot normalization is `integral b dm' dtheta'`); the session rejects
+  `divide_jacobian=False` in Square-Dalitz coordinates. Generic callables cannot be checked:
+  they must be Dalitz-plot densities.
+
+**Input in `(m', theta')`.** `PhaseSpaceSample.from_square_dalitz(mprime, thetaprime,
+mother_mass=..., masses=..., pair=...)` builds a sample from Square-Dalitz coordinates (amplitudes
+are evaluated from the invariants it computes), `sample.square_dalitz(...)` returns them, and
+`read_phase_space_sample(..., mprime="mp", thetaprime="thp", mother_mass=..., masses=...,
+pair=...)` reads them from ROOT (also through `FitSession.from_root`). Projections in
+`(m', theta')` use `plot_projection(..., square_dalitz=True)`.
+
+`tests/test_square_dalitz_fit.py` fits the same toys in both coordinates (single sample and CP,
+with Square-Dalitz efficiency and background) and checks equal values and errors and an NLL
+difference of `sum_i log |J_i|`.
+
 ## Validation
 
 `tests/test_square_dalitz.py` checks:

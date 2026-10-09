@@ -50,6 +50,48 @@ class PhaseSpaceSample:
             data.update({"p1": self.p1, "p2": self.p2, "p3": self.p3})
         return data
 
+    @classmethod
+    def from_square_dalitz(
+        cls,
+        mprime,
+        thetaprime,
+        *,
+        mother_mass: float,
+        masses: tuple[float, float, float],
+        pair: tuple[int, int],
+        weights=None,
+    ) -> PhaseSpaceSample:
+        """Build a sample from Laura++ Square-Dalitz coordinates ``(m', theta')``.
+
+        ``pair`` is the ordered daughter pair defining ``m'`` (the
+        ``normalization_pair`` of a ``square-dalitz`` model). The invariants
+        are what amplitudes are evaluated from; ``weights`` default to one.
+        """
+        from .square_dalitz import square_dalitz_to_invariants
+
+        s12, s13, s23 = square_dalitz_to_invariants(
+            jnp.asarray(mprime), jnp.asarray(thetaprime),
+            mother_mass=mother_mass, masses=masses, pair=pair,
+        )
+        if weights is None:
+            weights = jnp.ones_like(s12)
+        return cls(s12=s12, s13=s13, s23=s23, weights=jnp.asarray(weights))
+
+    def square_dalitz(
+        self,
+        *,
+        mother_mass: float,
+        masses: tuple[float, float, float],
+        pair: tuple[int, int],
+    ) -> tuple[Array, Array]:
+        """Return the events' Laura++ Square-Dalitz coordinates ``(m', theta')``."""
+        from .square_dalitz import invariants_to_square_dalitz
+
+        return invariants_to_square_dalitz(
+            self.s12, self.s13, self.s23,
+            mother_mass=mother_mass, masses=masses, pair=pair,
+        )
+
     def momentum_dict(self) -> dict[str, Array]:
         """Return ``{"p1", "p2", "p3"}`` four-momenta; raises if not stored."""
 

@@ -10,6 +10,7 @@ import jax
 import jax.numpy as jnp
 
 from jaxpwa.fit.parameters import Parameter, ParameterKind
+from jaxpwa.kinematics.square_dalitz import fold_thetaprime, invariants_to_square_dalitz
 
 
 def _kallen(x, y, z):
@@ -144,7 +145,7 @@ def _nearest_active_sources(mask):
         return None
     active = [(i, j) for i, row in enumerate(mask) for j, ok in enumerate(row) if ok]
     if not active:
-        raise ValueError("QMI2D active_mask contains no physical bins")
+        raise ValueError("QMIPixel active_mask contains no physical bins")
     ny = len(mask[0])
     sources = []
     for i, row in enumerate(mask):
@@ -165,7 +166,7 @@ def _fill_inactive_from_sources(values, sources):
 
 
 @dataclass(frozen=True)
-class QMI2D:
+class QMIPixel:
     """Complex amplitude field defined bin-by-bin over the Dalitz plane.
 
     Each cell owns ``a_ij exp(i phi_ij)``. ``active_mask`` may be supplied to
@@ -176,6 +177,28 @@ class QMI2D:
     All geometry that depends only on the fixed binning/mask is cached once:
     bin edges, centres and the nearest-active ghost-cell gather map. Floating
     QMI magnitudes/phases therefore only rebuild the value field itself.
+
+    ``coordinates`` selects the plane the grid lives on:
+
+    - ``"dalitz"`` (default): the axes are the invariants ``s12`` (first) and
+      ``s13`` (second); ``folded=True`` evaluates at ``(min(s12, s13),
+      max(s12, s13))`` and requires identical edges on both axes.
+    - ``"square-dalitz"``: the axes are the Laura++ Square-Dalitz coordinates
+      ``m'`` (first, given in ``s12_edges``) and ``theta'`` (second, given in
+      ``s13_edges``), both in ``[0, 1]``, for the ordered daughter ``pair`` and
+      the channel's ``mother_mass`` and daughter ``masses`` (all three
+      required). The whole unit square is physical, so no ``active_mask`` is
+      needed. ``folded=True`` folds ``theta' -> min(theta', 1 - theta')``
+      (:func:`~jaxpwa.kinematics.fold_thetaprime`), so the second-axis edges
+      must lie within ``[0, 0.5]``. As for the Square-Dalitz histograms,
+      ``pair`` must then be the identical pair itself (e.g. ``(1, 2)`` for
+      ``("pi-", "pi+", "pi+")``): only for that pair does the exchange map
+      ``theta'`` to ``1 - theta'``, and nothing here can check it from the
+      masses alone.
+
+    The grid only parametrizes the amplitude; the likelihood and its
+    normalization are unchanged (the Square-Dalitz Jacobian is
+    parameter-independent).
     """
     s12_edges: tuple[float,...]
     s13_edges: tuple[float,...]
@@ -184,41 +207,78 @@ class QMI2D:
     interpolation: str = "none"
     folded: bool = False
     active_mask: tuple[tuple[bool,...],...] | None = None
+    coordinates: str = "dalitz"
+    mother_mass: float | None = None
+    masses: tuple[float, float, float] | None = None
+    pair: tuple[int, int] | None = None
 
     def __post_init__(self):
+        if self.coordinates not in {"dalitz", "square-dalitz"}:
+            raise ValueError("QMIPixel coordinates must be 'dalitz' or 'square-dalitz'")
+        if self.coordinates == "square-dalitz":
+            if self.mother_mass is None or self.masses is None or self.pair is None:
+                raise ValueError(
+                    "QMIPixel coordinates='square-dalitz' requires mother_mass, "
+                    "masses and pair"
+                )
+            if len(self.masses) != 3:
+                raise ValueError("QMIPixel masses must contain three daughter masses")
+            pair = tuple(int(v) for v in self.pair)
+            if len(pair) != 2 or pair[0] == pair[1] or not set(pair) <= {0, 1, 2}:
+                raise ValueError(
+                    "QMIPixel pair must contain two distinct indices from 0, 1, 2"
+                )
+            object.__setattr__(self, "masses", tuple(float(v) for v in self.masses))
+            object.__setattr__(self, "mother_mass", float(self.mother_mass))
+            object.__setattr__(self, "pair", pair)
+            edges = (*self.s12_edges, *self.s13_edges)
+            if not all(0.0 <= float(v) <= 1.0 for v in edges):
+                raise ValueError("QMIPixel Square-Dalitz edges must lie within [0, 1]")
+            if self.folded and float(self.s13_edges[-1]) > 0.5 + 1e-9:
+                raise ValueError(
+                    "QMIPixel folded Square-Dalitz grids require theta' edges "
+                    "(s13_edges) "
+                    "within [0, 0.5]: evaluation folds theta' onto that half, so bins "
+                    "above 0.5 would never be reached"
+                )
+        elif any(v is not None for v in (self.mother_mass, self.masses, self.pair)):
+            raise ValueError(
+                "QMIPixel mother_mass, masses and pair are only used with "
+                "coordinates='square-dalitz'"
+            )
         if not all(isfinite(float(v)) for v in (*self.s12_edges, *self.s13_edges)):
-            raise ValueError("QMI2D bin edges must be finite")
+            raise ValueError("QMIPixel bin edges must be finite")
         for grid in (self.magnitudes, self.phases):
             for row in grid:
                 for value in row:
                     if (isinstance(value, Parameter) and not value.fixed
                             and value.kind is not ParameterKind.DYNAMICS):
                         raise ValueError(
-                            f"QMI2D node {value.name!r} must use Parameter.dynamics "
+                            f"QMIPixel node {value.name!r} must use Parameter.dynamics "
                             "with the component owner"
                         )
-        if len(self.s12_edges)<2 or len(self.s13_edges)<2: raise ValueError("QMI2D requires at least one bin on each axis")
-        if any(b<=a for a,b in zip(self.s12_edges[:-1],self.s12_edges[1:])): raise ValueError("QMI2D s12_edges must be strictly increasing")
-        if any(b<=a for a,b in zip(self.s13_edges[:-1],self.s13_edges[1:])): raise ValueError("QMI2D s13_edges must be strictly increasing")
+        if len(self.s12_edges)<2 or len(self.s13_edges)<2: raise ValueError("QMIPixel requires at least one bin on each axis")
+        if any(b<=a for a,b in zip(self.s12_edges[:-1],self.s12_edges[1:])): raise ValueError("QMIPixel s12_edges must be strictly increasing")
+        if any(b<=a for a,b in zip(self.s13_edges[:-1],self.s13_edges[1:])): raise ValueError("QMIPixel s13_edges must be strictly increasing")
         s12_edges = tuple(float(v) for v in self.s12_edges)
         s13_edges = tuple(float(v) for v in self.s13_edges)
-        if self.folded and s12_edges != s13_edges:
+        if self.folded and self.coordinates == "dalitz" and s12_edges != s13_edges:
             raise ValueError(
-                "QMI2D folded=True requires s12_edges and s13_edges to be identical: "
-                "_coordinates() looks up min(s12,s13) on the s12 grid and "
+                "QMIPixel folded=True requires s12_edges and s13_edges to be "
+                "identical: _coordinates() looks up min(s12,s13) on the s12 grid and "
                 "max(s12,s13) on the s13 grid, so mismatched axis ranges silently "
                 "clamp whichever physical value happens to be smaller/larger to the "
                 "narrower grid's boundary instead of raising, distorting the field "
                 "near and beyond that boundary"
             )
         nx,ny=self.shape
-        if len(self.magnitudes)!=nx or any(len(r)!=ny for r in self.magnitudes): raise ValueError("QMI2D magnitudes shape must match the 2D binning")
-        if len(self.phases)!=nx or any(len(r)!=ny for r in self.phases): raise ValueError("QMI2D phases shape must match the 2D binning")
-        if self.active_mask is not None and (len(self.active_mask)!=nx or any(len(r)!=ny for r in self.active_mask)): raise ValueError("QMI2D active_mask shape must match the 2D binning")
-        if self.interpolation not in {"none","linear","cubic"}: raise ValueError("QMI2D interpolation must be 'none', 'linear', or 'cubic'")
-        if self.interpolation=="cubic" and (nx<2 or ny<2): raise ValueError("cubic QMI2D interpolation requires at least 2x2 bins")
+        if len(self.magnitudes)!=nx or any(len(r)!=ny for r in self.magnitudes): raise ValueError("QMIPixel magnitudes shape must match the 2D binning")
+        if len(self.phases)!=nx or any(len(r)!=ny for r in self.phases): raise ValueError("QMIPixel phases shape must match the 2D binning")
+        if self.active_mask is not None and (len(self.active_mask)!=nx or any(len(r)!=ny for r in self.active_mask)): raise ValueError("QMIPixel active_mask shape must match the 2D binning")
+        if self.interpolation not in {"none","linear","cubic"}: raise ValueError("QMIPixel interpolation must be 'none', 'linear', or 'cubic'")
+        if self.interpolation=="cubic" and (nx<2 or ny<2): raise ValueError("cubic QMIPixel interpolation requires at least 2x2 bins")
         if self.active_mask is not None and not any(any(row) for row in self.active_mask):
-            raise ValueError("QMI2D active_mask contains no physical bins")
+            raise ValueError("QMIPixel active_mask contains no physical bins")
         if self.active_mask is not None:
             for i, row in enumerate(self.active_mask):
                 for j, active in enumerate(row):
@@ -226,7 +286,7 @@ class QMI2D:
                         for value in (self.magnitudes[i][j], self.phases[i][j]):
                             if isinstance(value, Parameter) and not value.fixed:
                                 raise ValueError(
-                                    f"QMI2D inactive cell ({i}, {j}) cannot contain "
+                                    f"QMIPixel inactive cell ({i}, {j}) cannot contain "
                                     f"free parameter {value.name!r}"
                                 )
 
@@ -265,10 +325,22 @@ class QMI2D:
 
     def _coordinates(self,data):
         s12,s13=jnp.asarray(data["s12"]),jnp.asarray(data["s13"])
+        if self.coordinates == "square-dalitz":
+            # s12 + s13 + s23 = M^2 + sum m_i^2: only s12 and s13 are needed.
+            s23 = self.mother_mass**2 + sum(m * m for m in self.masses) - s12 - s13
+            mprime, thetaprime = invariants_to_square_dalitz(
+                s12, s13, s23,
+                mother_mass=self.mother_mass, masses=self.masses, pair=self.pair,
+            )
+            return mprime, (fold_thetaprime(thetaprime) if self.folded else thetaprime)
         return (jnp.minimum(s12,s13),jnp.maximum(s12,s13)) if self.folded else (s12,s13)
 
     def interpolated_magnitude_phase(self,data):
-        """Return the interpolated (magnitude, phase) at each event's (s12, s13)."""
+        """Return the interpolated (magnitude, phase) at each event.
+
+        The grid axes are ``(s12, s13)`` or, with
+        ``coordinates="square-dalitz"``, ``(m', theta')``.
+        """
         x,y=self._coordinates(data)
         xe=self._x_edges_fixed.astype(x.dtype)
         ye=self._y_edges_fixed.astype(y.dtype)
@@ -305,4 +377,4 @@ class QMI2D:
         return {"s12": data["s12"], "s13": data["s13"]}
 
 
-__all__=["QMI2D","physical_bin_mask"]
+__all__=["QMIPixel","physical_bin_mask"]

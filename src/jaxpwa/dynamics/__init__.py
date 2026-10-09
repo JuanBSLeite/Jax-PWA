@@ -34,7 +34,7 @@ from .lineshape import (
     kallen,
 )
 from .polar_form_factor_nr import PolarFormFactorSymNR
-from .qmi2d import QMI2D, physical_bin_mask
+from .qmi_pixel import QMIPixel, physical_bin_mask
 from .resonance import ResonanceAmplitude
 from .sequential import CascadeChain, Isobar, PairChain
 
@@ -53,7 +53,7 @@ __all__ = [
     "PipiKKRescattering",
     "PolarFormFactorSymNR",
     "QMI",
-    "QMI2D",
+    "QMIPixel",
     "RelativisticBreitWigner",
     "RhoOmegaMixing",
     "Rescattering2",

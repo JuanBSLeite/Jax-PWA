@@ -5,7 +5,7 @@ from jaxpwa import (
     DecayChannel,
     DecayModel,
     Parameter,
-    QMI2D,
+    QMIPixel,
     RealImag,
     enable_x64,
     physical_bin_mask,
@@ -19,8 +19,8 @@ def _data(s12, s13):
     return {"s12": jnp.asarray(s12), "s13": jnp.asarray(s13)}
 
 
-def test_qmi2d_none_is_piecewise_constant_per_bin():
-    model = QMI2D(
+def test_qmi_pixel_none_is_piecewise_constant_per_bin():
+    model = QMIPixel(
         s12_edges=(0.0, 1.0, 2.0),
         s13_edges=(0.0, 1.0, 2.0),
         magnitudes=((1.0, 2.0), (3.0, 4.0)),
@@ -34,8 +34,8 @@ def test_qmi2d_none_is_piecewise_constant_per_bin():
     assert bool(jnp.allclose(phase, jnp.asarray([0.0, 0.1, 0.2, 0.3])))
 
 
-def test_qmi2d_linear_interpolates_between_bin_centers():
-    model = QMI2D(
+def test_qmi_pixel_linear_interpolates_between_bin_centers():
+    model = QMIPixel(
         s12_edges=(0.0, 1.0, 2.0),
         s13_edges=(0.0, 1.0, 2.0),
         magnitudes=((1.0, 3.0), (3.0, 5.0)),
@@ -47,11 +47,11 @@ def test_qmi2d_linear_interpolates_between_bin_centers():
     assert abs(float(phase[0]) - 0.2) < 1e-12
 
 
-def test_qmi2d_cubic_reproduces_all_bin_center_values():
+def test_qmi_pixel_cubic_reproduces_all_bin_center_values():
     edges = (0.0, 1.0, 2.0, 3.0, 4.0)
     magnitudes = tuple(tuple(float(i + 2 * j + 1) for j in range(4)) for i in range(4))
     phases = tuple(tuple(float(0.1 * i - 0.05 * j) for j in range(4)) for i in range(4))
-    model = QMI2D(
+    model = QMIPixel(
         s12_edges=edges,
         s13_edges=edges,
         magnitudes=magnitudes,
@@ -65,8 +65,8 @@ def test_qmi2d_cubic_reproduces_all_bin_center_values():
     assert bool(jnp.allclose(phase.reshape(4, 4), jnp.asarray(phases), atol=1e-12))
 
 
-def test_qmi2d_caches_fixed_interpolation_geometry():
-    model = QMI2D(
+def test_qmi_pixel_caches_fixed_interpolation_geometry():
+    model = QMIPixel(
         s12_edges=(0.0, 1.0, 2.0),
         s13_edges=(0.0, 1.0, 2.0),
         magnitudes=((1.0, 2.0), (3.0, 4.0)),
@@ -84,8 +84,8 @@ def test_qmi2d_caches_fixed_interpolation_geometry():
     assert first_sources == (0, 0, 2, 3)
 
 
-def test_qmi2d_folded_is_symmetric_under_s12_s13_exchange():
-    model = QMI2D(
+def test_qmi_pixel_folded_is_symmetric_under_s12_s13_exchange():
+    model = QMIPixel(
         s12_edges=(0.0, 1.0, 2.0),
         s13_edges=(0.0, 1.0, 2.0),
         magnitudes=((1.0, 2.0), (3.0, 4.0)),
@@ -115,8 +115,8 @@ def test_physical_bin_mask_keeps_endpoint_bins_and_rejects_external_cells():
     assert not mask[-1][-1]
 
 
-def test_qmi2d_active_mask_zeroes_inactive_piecewise_bins():
-    model = QMI2D(
+def test_qmi_pixel_active_mask_zeroes_inactive_piecewise_bins():
+    model = QMIPixel(
         s12_edges=(0.0, 1.0, 2.0),
         s13_edges=(0.0, 1.0, 2.0),
         magnitudes=((1.0, 2.0), (3.0, 4.0)),
@@ -129,11 +129,11 @@ def test_qmi2d_active_mask_zeroes_inactive_piecewise_bins():
     assert float(phase[0]) == 0.0
 
 
-def test_qmi2d_parameters_are_collected_and_change_decay_intensity():
-    owner = "qmi2d"
-    a00 = Parameter.dynamics("qmi2d.a00", 1.0, owner=owner, bounds=(0.0, None))
-    p00 = Parameter.dynamics("qmi2d.p00", 0.0, owner=owner)
-    field = QMI2D(
+def test_qmi_pixel_parameters_are_collected_and_change_decay_intensity():
+    owner = "qmi_pixel"
+    a00 = Parameter.dynamics("qmi_pixel.a00", 1.0, owner=owner, bounds=(0.0, None))
+    p00 = Parameter.dynamics("qmi_pixel.p00", 0.0, owner=owner)
+    field = QMIPixel(
         s12_edges=(0.0, 2.0, 4.0),
         s13_edges=(0.0, 2.0, 4.0),
         magnitudes=((a00, 1.2), (0.8, 1.1)),
@@ -147,15 +147,15 @@ def test_qmi2d_parameters_are_collected_and_change_decay_intensity():
         normalization_resolution=30,
     )
     names = {parameter.name for parameter in decay.parameters}
-    assert {"qmi2d.a00", "qmi2d.p00"}.issubset(names)
+    assert {"qmi_pixel.a00", "qmi_pixel.p00"}.issubset(names)
 
     data = decay.normalization_sample.as_dict()
-    nominal = decay.intensity(data, {"qmi2d.a00": 1.0, "qmi2d.p00": 0.0})
-    shifted = decay.intensity(data, {"qmi2d.a00": 1.8, "qmi2d.p00": 0.5})
+    nominal = decay.intensity(data, {"qmi_pixel.a00": 1.0, "qmi_pixel.p00": 0.0})
+    shifted = decay.intensity(data, {"qmi_pixel.a00": 1.8, "qmi_pixel.p00": 0.5})
     assert bool(jnp.any(jnp.abs(nominal - shifted) > 1e-10))
 
 
-def test_qmi2d_folded_rejects_mismatched_axis_edges():
+def test_qmi_pixel_folded_rejects_mismatched_axis_edges():
     # `_coordinates()` looks up min(s12,s13) on the s12 grid and max(s12,s13)
     # on the s13 grid; if the two grids have different ranges this silently
     # clamps whichever physical value happens to be smaller/larger to the
@@ -164,7 +164,7 @@ def test_qmi2d_folded_rejects_mismatched_axis_edges():
     # to always be used with identical s12_edges/s13_edges, so a mismatch is
     # rejected outright rather than silently misinterpreted.
     try:
-        QMI2D(
+        QMIPixel(
             s12_edges=(0.0, 1.0, 2.0),
             s13_edges=(0.0, 1.0, 2.0, 3.0),
             magnitudes=((1.0, 2.0), (3.0, 4.0)),
@@ -174,12 +174,12 @@ def test_qmi2d_folded_rejects_mismatched_axis_edges():
     except ValueError as exc:
         assert "folded" in str(exc)
     else:
-        raise AssertionError("QMI2D accepted folded=True with mismatched axis edges")
+        raise AssertionError("QMIPixel accepted folded=True with mismatched axis edges")
 
 
-def test_qmi2d_rejects_unknown_interpolation_mode():
+def test_qmi_pixel_rejects_unknown_interpolation_mode():
     try:
-        QMI2D(
+        QMIPixel(
             s12_edges=(0.0, 1.0),
             s13_edges=(0.0, 1.0),
             magnitudes=((1.0,),),
@@ -189,11 +189,11 @@ def test_qmi2d_rejects_unknown_interpolation_mode():
     except ValueError as exc:
         assert "interpolation" in str(exc)
     else:
-        raise AssertionError("QMI2D accepted an unknown interpolation mode")
+        raise AssertionError("QMIPixel accepted an unknown interpolation mode")
 
 
-def test_qmi2d_compact_prepared_data_drops_unrelated_state():
-    model = QMI2D(
+def test_qmi_pixel_compact_prepared_data_drops_unrelated_state():
+    model = QMIPixel(
         s12_edges=(0.0, 1.0, 2.0),
         s13_edges=(0.0, 1.0, 2.0),
         magnitudes=((1.0, 2.0), (3.0, 4.0)),
@@ -211,8 +211,8 @@ def test_qmi2d_compact_prepared_data_drops_unrelated_state():
     assert bool(jnp.allclose(model(compact), model(shared)))
 
 
-def test_qmi2d_compact_prepared_data_falls_back_without_coordinates():
-    model = QMI2D(
+def test_qmi_pixel_compact_prepared_data_falls_back_without_coordinates():
+    model = QMIPixel(
         s12_edges=(0.0, 1.0),
         s13_edges=(0.0, 1.0),
         magnitudes=((1.0,),),
@@ -222,13 +222,13 @@ def test_qmi2d_compact_prepared_data_falls_back_without_coordinates():
     assert model.compact_prepared_data(data) == data
 
 
-def test_resolved_direct_dynamics_delegates_compaction_to_qmi2d():
-    owner = "qmi2d"
-    field = QMI2D(
+def test_resolved_direct_dynamics_delegates_compaction_to_qmi_pixel():
+    owner = "qmi_pixel"
+    field = QMIPixel(
         s12_edges=(0.0, 2.0, 4.0),
         s13_edges=(0.0, 2.0, 4.0),
         magnitudes=((1.0, 1.2), (0.8, 1.1)),
-        phases=((Parameter.dynamics("qmi2d.p00", 0.0, owner=owner), 0.2), (0.4, 0.6)),
+        phases=((Parameter.dynamics("qmi_pixel.p00", 0.0, owner=owner), 0.2), (0.4, 0.6)),
         interpolation="linear",
     )
     decay = DecayModel(

@@ -15,11 +15,11 @@ Flatte(...)
 LASS(...)
 KMatrix(...)
 QMI(...)
-QMI2D(...)
+QMIPixel(...)
 PolarFormFactorSymNR(...)
 ```
 
-One-dimensional isobar dynamics use the ordinary `lineshape(mass, context)` interface through `Resonance`. A genuinely two-dimensional Dalitz amplitude such as `QMI2D` or `PolarFormFactorSymNR` is attached through `DalitzAmplitude` because it depends simultaneously on two invariant-mass-squared coordinates.
+One-dimensional isobar dynamics use the ordinary `lineshape(mass, context)` interface through `Resonance`. A genuinely two-dimensional Dalitz amplitude such as `QMIPixel` or `PolarFormFactorSymNR` is attached through `DalitzAmplitude` because it depends simultaneously on two invariant-mass-squared coordinates.
 
 ## Relativistic Breit-Wigner
 
@@ -341,9 +341,9 @@ unit-normalized with all node magnitudes free, the fit can evade the penalty
 by shrinking the nodes without changing its PDF. The constraint deliberately
 does not change those normalization choices for the caller.
 
-## QMI2D Dalitz amplitude
+## QMIPixel Dalitz amplitude
 
-`QMI2D` is the direct two-dimensional extension of the QMI idea. Every Dalitz cell carries one complex amplitude
+`QMIPixel` is the direct two-dimensional extension of the QMI idea. Every Dalitz cell carries one complex amplitude
 
 ```text
 A_ij = a_ij exp(i phi_ij).
@@ -354,9 +354,9 @@ The axes are given directly in Dalitz invariants (`s12` and `s13`) through bin e
 Three evaluation modes are available:
 
 ```python
-QMI2D(..., interpolation="none")
-QMI2D(..., interpolation="linear")
-QMI2D(..., interpolation="cubic")
+QMIPixel(..., interpolation="none")
+QMIPixel(..., interpolation="linear")
+QMIPixel(..., interpolation="cubic")
 ```
 
 - `none` is piecewise constant: every event receives exactly the complex number assigned to its bin.
@@ -392,7 +392,7 @@ mask = physical_bin_mask(
     folded=True,
 )
 
-field = QMI2D(
+field = QMIPixel(
     s12_edges=tuple(edges),
     s13_edges=tuple(edges),
     magnitudes=magnitudes,
@@ -428,12 +428,41 @@ which imposes the exchange symmetry directly on the two-dimensional field. This 
 
 `folded=True` requires `s12_edges` and `s13_edges` to be identical (the constructor raises otherwise): the lookup above puts `s_low` on the `s12` grid and `s_high` on the `s13` grid, so mismatched ranges would silently clamp whichever physical value happens to be smaller/larger to the narrower grid's boundary instead of producing the intended single symmetric field.
 
-A QMI2D component is attached directly to the coherent amplitude model:
+### Square-Dalitz grid
+
+`coordinates="square-dalitz"` puts the grid on the Laura++ Square-Dalitz coordinates instead of
+the invariants: the first axis (`s12_edges`) is `m'` and the second (`s13_edges`) is `theta'`, both
+in `[0, 1]`, for the ordered daughter `pair` of the channel with `mother_mass` and daughter
+`masses` (the three are then required):
+
+```python
+field = QMIPixel(
+    s12_edges=tuple(np.linspace(0.0, 1.0, 21)),   # m'
+    s13_edges=tuple(np.linspace(0.0, 0.5, 11)),   # theta', folded half
+    magnitudes=magnitudes, phases=phases,
+    interpolation="linear", folded=True,
+    coordinates="square-dalitz",
+    mother_mass=channel.parent_mass, masses=channel.daughter_masses, pair=(1, 2),
+)
+```
+
+The whole unit square is physical, so no `active_mask` (and no ghost cells) is needed, and a
+uniform grid in `(m', theta')` already concentrates resolution near the Dalitz-plot edges.
+`folded=True` folds `theta' -> min(theta', 1 - theta')` and requires the `theta'` edges within
+`[0, 0.5]`; as for `SquareDalitzHistogramEfficiency`, `pair` must then be the identical pair
+itself (`(1, 2)` for `("pi-", "pi+", "pi+")`), which nothing can check from the masses alone.
+The option only changes how the amplitude is parametrized: the likelihood, its normalization
+and the CP joint normalization of `CPFitSession` are unchanged, and with one field per charge
+it works in CP fits as in single-charge ones. Fitting the events themselves in `(m', theta')`
+is a separate session option, `coordinates="square-dalitz"` (see
+[square_dalitz.md](square_dalitz.md#fitting-in-square-dalitz-coordinates)); the two combine.
+
+A QMIPixel component is attached directly to the coherent amplitude model:
 
 ```python
 model = DecayModel(
     channel,
-    [DalitzAmplitude("qmi2d", field, RealImag(1.0, 0.0))],
+    [DalitzAmplitude("qmi_pixel", field, RealImag(1.0, 0.0))],
 )
 ```
 
@@ -474,11 +503,11 @@ prepared cache and is rejected. Fixed generic parameters remain supported.
 
 ## QMI fit parameters and scale convention
 
-Declare every free QMI/QMI2D node with
+Declare every free QMI/QMIPixel node with
 `Parameter.dynamics(name, value, owner=component_name)`. Generic free
 `Parameter(...)` nodes are rejected because they would otherwise be exposed to
 Minuit while remaining frozen in the amplitude cache. Fixed generic parameters
-remain supported. Knot masses and QMI2D bin edges must be finite.
+remain supported. Knot masses and QMIPixel bin edges must be finite.
 
 Prepared interpolation data are isolated per resonance amplitude, so multiple
 QMI components on the same particle pair may use different knot grids.

@@ -39,7 +39,7 @@ separate approximations. No remote data, GPU, or ROOT installation is required.
 | 9 | [Goodness of fit](tutorial_09_goodness_of_fit.ipynb) | BinnedChi2Result, chi2 1D/2D, point_to_point_dissimilarity, plot_pulls |
 | 10 | [QMI S-wave isobar closure](../validation/b2pipipi_qmi_isobar_closure_no_cp_mag_phase.ipynb) | QMI, magnitude/phase recovery, closure diagnostics |
 | 11 | [QMI Cartesian isobar closure](../validation/b2pipipi_qmi_isobar_closure_no_cp.ipynb) | Cartesian QMI nodes, coefficient recovery, fit validation |
-| 12 | [QMI2D: campo de Dalitz e ajuste de toy](tutorial_10_qmi2d_dalitz_closure.ipynb) | QMI2D, DalitzAmplitude, máscara física, folding, interpolação e ajuste de magnitude/fase |
+| 12 | [QMIPixel: campo de Dalitz e ajuste de toy](tutorial_10_qmi_pixel_dalitz_closure.ipynb) | QMIPixel, DalitzAmplitude, máscara física, folding, interpolação e ajuste de magnitude/fase |
 
 | 13 | [Line shapes opcionais com SymPy](tutorial_11_sympy_lineshapes.ipynb) | SympyLineshape, parâmetros explícitos, gradientes, ajuste Asimov e JSON; requer o extra `sympy` |
 | 14 | [SymPy no Dalitz de B → 3π](tutorial_12_sympy_b3pi_dalitz.ipynb) | Polo definido por SymPy, spin=1 com Zemach_P, fatores de forma, simetrização de π⁺ idênticos e gradientes |
@@ -102,7 +102,7 @@ way as [`docs/catalog.md`](../../docs/catalog.md), or jump straight to a noteboo
 | 60 | [BackgroundCategory vs BackgroundSpec](tutorial_60_background_category_vs_spec.ipynb) | `BackgroundCategory` vs `BackgroundSpec` |
 | 61 | [CP background spec/category](tutorial_61_cp_background_spec_and_category.ipynb) | `CPBackgroundSpec`/`CPBackgroundCategory` |
 | 62 | [Resonance internals](tutorial_62_resonance_internals.ipynb) | `ResonanceAmplitude`/`ResonanceContext` |
-| 63 | [DalitzAmplitude + QMI2D](tutorial_63_dalitz_amplitude_qmi2d.ipynb) | `DalitzAmplitude` wrapping `QMI2D` |
+| 63 | [DalitzAmplitude + QMIPixel](tutorial_63_dalitz_amplitude_qmi_pixel.ipynb) | `DalitzAmplitude` wrapping `QMIPixel` |
 | 64 | [Feature index](tutorial_64_feature_index.ipynb) | Decision table linking back to all of the above |
 | 65 | [Weighted unbinned NLL](tutorial_65_weighted_unbinned_nll.ipynb) | `WeightedUnbinnedNLL` |
 
@@ -121,7 +121,7 @@ Use these existing notebooks and documents for extensions:
 | Repeated toy generation | [Toy generation](../tests/user_friendly_toy_generation.ipynb), [prepared generators](../../docs/toy_generation.md) |
 | One-dimensional resolution | [PDF convolution](../tests/pdf_convolution_resolution.ipynb) |
 | Identical-particle folding | [Folded histogram maps](tutorial_35_histogram_maps_from_arrays.ipynb), [folding conventions](../../docs/backgrounds_and_vetoes.md) |
-| Alternative lineshapes, QMI and QMI2D | [Lineshape documentation](../../docs/lineshapes.md), [dynamics structure](../../docs/dynamics_structure.md) |
+| Alternative lineshapes, QMI and QMIPixel | [Lineshape documentation](../../docs/lineshapes.md), [dynamics structure](../../docs/dynamics_structure.md) |
 
 The `../examples/` and `../validation/` directories contain worked analyses, closure studies and
 numerical reproductions rather than introductory lessons. Consult the

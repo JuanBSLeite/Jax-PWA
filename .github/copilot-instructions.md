@@ -94,7 +94,7 @@ uncertainty reporting without a separate Hessian calculation.
 plus `sympy.py`'s `SympyLineshape` for user-written symbolic lineshapes via the optional `sympy`
 extra) combined with an angular factor (`dynamics/angular.py`) and Blatt-Weisskopf
 barriers. `DalitzAmplitude` bypasses that isobar construction entirely for amplitudes that are
-intrinsically two-dimensional (`QMI2D`, `dynamics/qmi2d.py`), evaluated directly over
+intrinsically two-dimensional (`QMIPixel`, `dynamics/qmi_pixel.py`), evaluated directly over
 `(s12, s13)`.
 
 `QMI`'s `interpolation="cubic"` is not a cubic spline in the usual sense: it is a strictly local
@@ -201,7 +201,7 @@ from a limited sample or for diagnostic plots, not a correctness requirement:
 modules), `SquareDalitzHistogramEfficiency`/`SquareDalitzHistogramBackground` (`(m', theta')`,
 `square_histograms.py`), `plot_dalitz`/`plot_square_dalitz`, and `FitSession`/
 `CPFitSession.plot_projection` (`fold_side="low"|"high"`) all fold with the same `min`/`max`
-convention `QMI2D(folded=True)` already uses. `pair` (or `x_edges == y_edges`) **must be the
+convention `QMIPixel(folded=True)` already uses. `pair` (or `x_edges == y_edges`) **must be the
 actual identical pair** — nothing can check this from `masses` alone, since two *distinct*
 particles (e.g. `pi+`/`pi-`) can share a mass without being identical; picking the wrong pair
 folds by a symmetry the data don't have, silently. See `docs/backgrounds_and_vetoes.md`. The

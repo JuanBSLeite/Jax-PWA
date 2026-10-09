@@ -183,14 +183,14 @@ retains only the five kinematics arrays (`mass`, `pstar`, `p`, `q`, `costheta`) 
 pairings needs plus its own namespaced prepared-lineshape entry, falling back to the full copy
 only if those keys are unexpectedly absent.
 
-`QMI2D` (via `DalitzAmplitude`/`_ResolvedDirectDynamics` in `decay.py`) had no
-`compact_prepared_data` at all, so any model combining a floating `QMI2D` field with floating 1D
+`QMIPixel` (via `DalitzAmplitude`/`_ResolvedDirectDynamics` in `decay.py`) had no
+`compact_prepared_data` at all, so any model combining a floating `QMIPixel` field with floating 1D
 resonances lost compaction entirely even after the `ResonanceAmplitude` fix above. It now retains
 only `s12`/`s13`, the sole keys `interpolated_magnitude_phase` reads; `_ResolvedDirectDynamics`
 delegates to the wrapped dynamics object's own `compact_prepared_data` when present. Any future
 `AmplitudeComponent`-compatible dynamics object used as a floating component needs the same method
 for compaction to remain effective across the rest of the model — see
-`tests/test_resonance_amplitude.py` and `tests/test_qmi2d.py` for the expected contract.
+`tests/test_resonance_amplitude.py` and `tests/test_qmi_pixel.py` for the expected contract.
 
 ## Input memory in multi-toy studies
 
@@ -560,7 +560,7 @@ solves its knot-sized tridiagonal system from scratch with `jnp.linalg.solve`, t
 JAX autodiff rather than a custom VJP, so changing magnitudes or phases re-solves the system;
 benchmark it separately from the local modes for large fits (see `docs/lineshapes.md`).
 
-For `QMI2D`, fixed interpolation geometry is also cached: bin edges, bin centres, active masks and the nearest-active gather map used to fill ghost cells. Floating magnitudes/phases therefore update only the value field and interpolation algebra, not the geometry construction.
+For `QMIPixel`, fixed interpolation geometry is also cached: bin edges, bin centres, active masks and the nearest-active gather map used to fill ghost cells. Floating magnitudes/phases therefore update only the value field and interpolation algebra, not the geometry construction.
 
 ## K-matrix preparation
 

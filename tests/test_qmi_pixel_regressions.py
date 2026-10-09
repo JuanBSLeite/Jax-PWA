@@ -3,8 +3,8 @@ import jax.numpy as jnp
 import numpy as np
 import pytest
 
-from jaxpwa import QMI2D, Parameter, enable_x64, physical_bin_mask
-from jaxpwa.dynamics.qmi2d import _catmull_rom
+from jaxpwa import QMIPixel, Parameter, enable_x64, physical_bin_mask
+from jaxpwa.dynamics.qmi_pixel import _catmull_rom
 
 enable_x64()
 
@@ -15,7 +15,7 @@ def test_inactive_cell_rejects_free_nodes(phase):
     grid = ((1.0, free), (1.0, 1.0))
     fixed = ((1.0, 1.0), (1.0, 1.0))
     with pytest.raises(ValueError, match="inactive cell"):
-        QMI2D(
+        QMIPixel(
             (0.0, 1.0, 2.0),
             (0.0, 1.0, 2.0),
             fixed if phase else grid,
@@ -23,7 +23,7 @@ def test_inactive_cell_rejects_free_nodes(phase):
             interpolation="none",
             active_mask=((True, False), (True, True)),
         )
-    QMI2D(
+    QMIPixel(
         (0.0, 1.0, 2.0),
         (0.0, 1.0, 2.0),
         ((1.0, Parameter("fixed", 1.0, fixed=True)), (1.0, 1.0)),
@@ -51,7 +51,7 @@ def test_mask_rejects_invalid_edges(edges):
 
 
 def _field(edges, values):
-    return QMI2D(edges, edges, values, ((0.0,) * 4,) * 4, interpolation="cubic")
+    return QMIPixel(edges, edges, values, ((0.0,) * 4,) * 4, interpolation="cubic")
 
 
 def test_nonuniform_cubic_has_continuous_coordinate_derivatives():
