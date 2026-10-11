@@ -418,3 +418,119 @@ def test_square_dalitz_coordinates_reject_inconsistent_inputs():
     FitSession(
         _single_model(method="gauss-legendre"), data, signal_fraction=0.8
     ).with_background("bkg", background)
+
+
+def _square_sample(mprime, thetaprime, weights=None, *, mother=MOTHER, masses=MASSES):
+    return PhaseSpaceSample.from_square_dalitz(
+        jnp.asarray(mprime),
+        jnp.asarray(thetaprime),
+        mother_mass=mother,
+        masses=masses,
+        pair=PAIR,
+        weights=weights,
+    )
+
+
+def test_log_jacobian_rejects_events_outside_or_on_the_physical_boundary():
+    model = _single_model()
+    inside = _square_sample([0.4], [0.8])
+    assert np.isfinite(float(square_dalitz_log_jacobian(model, inside)[0]))
+    # Moving s_ik out of range while keeping the invariant sum fixed is not
+    # hidden by the cosine clipping of the coordinate transform.
+    shifted = {"s12": inside.s12 + 100.0, "s13": inside.s13 - 100.0, "s23": inside.s23}
+    with pytest.raises(ValueError, match="strictly inside"):
+        square_dalitz_log_jacobian(model, shifted)
+    for thetaprime in (0.0, 1.0):
+        with pytest.raises(ValueError, match="strictly inside"):
+            square_dalitz_log_jacobian(model, _square_sample([0.4], [thetaprime]))
+    with pytest.raises(ValueError, match="strictly inside"):
+        square_dalitz_log_jacobian(
+            model, {**inside.as_dict(), "s23": inside.s23 * jnp.nan}
+        )
+    # Single-precision stored invariants do not obey the mass sum to float64
+    # roundoff, and are accepted as on the Dalitz path.
+    stored = {
+        key: jnp.asarray(np.asarray(value, dtype=np.float32), dtype=jnp.float64)
+        for key, value in inside.as_dict().items()
+    }
+    assert np.isfinite(float(square_dalitz_log_jacobian(model, stored)[0]))
+
+
+def test_square_dalitz_input_rejects_invalid_coordinates(tmp_path):
+    for mprime, thetaprime in (
+        ([-0.4], [0.2]),
+        ([0.4], [1.2]),
+        ([np.nan], [0.2]),
+        ([0.4], [np.inf]),
+    ):
+        with pytest.raises(ValueError, match="finite and real in \\[0, 1\\]"):
+            _square_sample(mprime, thetaprime)
+    with pytest.raises(ValueError, match="matching shapes"):
+        _square_sample([0.4, 0.5], [0.2])
+    with pytest.raises(ValueError, match="matching finite real vector"):
+        _square_sample([0.4, 0.5], [0.2, 0.3], weights=jnp.ones(3))
+    with pytest.raises(ValueError, match="matching finite real vector"):
+        _square_sample([0.4, 0.5], [0.2, 0.3], weights=jnp.asarray([1.0, np.nan]))
+    signed = _square_sample([0.4, 0.5], [0.2, 0.3], weights=jnp.asarray([1.0, -0.5]))
+    np.testing.assert_allclose(signed.weights, [1.0, -0.5])
+
+    path = tmp_path / "invalid.root"
+    with uproot.recreate(path) as root_file:
+        root_file["events"] = {"mp": np.array([0.4, 0.4]), "thp": np.array([0.2, 1.2])}
+    with pytest.raises(ValueError, match="finite and real in \\[0, 1\\]"):
+        read_phase_space_sample(
+            path,
+            "events",
+            mprime="mp",
+            thetaprime="thp",
+            mother_mass=MOTHER,
+            masses=MASSES,
+            pair=PAIR,
+        )
+
+
+def test_weighted_square_dalitz_fits_ignore_zero_weight_boundary_events():
+    model = _single_model()
+    data = _square_sample([0.4, 0.6, 0.4], [0.3, 0.7, 0.0])
+    active = _square_sample([0.4, 0.6], [0.3, 0.7])
+    weights = jnp.asarray([1.0, 0.5, 0.0])
+    values = {p.name: float(p.value) + 0.05 for p in model.parameters if not p.fixed}
+    nll = {
+        c: float(
+            FitSession(model, data, coordinates=c)._weighted_objective(weights)(values)
+        )
+        for c in ("dalitz", "square-dalitz")
+    }
+    shift = float(jnp.sum(weights[:2] * square_dalitz_log_jacobian(model, active)))
+    np.testing.assert_allclose(nll["dalitz"] - nll["square-dalitz"], shift, rtol=1e-10)
+    with pytest.raises(ValueError, match="strictly inside"):
+        FitSession(model, data, coordinates="square-dalitz")._weighted_objective(
+            jnp.asarray([1.0, 0.5, 1e-3])
+        )
+
+    plus_model, minus_model = _cp_models()
+    minus_data = _square_sample([0.3, 0.5], [0.4, 0.6])
+    cp_weights = (weights, jnp.asarray([1.0, 0.8]))
+    sessions = {
+        c: CPFitSession(plus_model, minus_model, data, minus_data, coordinates=c)
+        for c in ("dalitz", "square-dalitz")
+    }
+    cp_values = {
+        p.name: float(p.value) + 0.05
+        for p in plus_model.parameters + minus_model.parameters
+        if not p.fixed
+    }
+    cp_nll = {
+        c: float(session._weighted_objective(cp_weights)(cp_values))
+        for c, session in sessions.items()
+    }
+    cp_shift = shift + float(
+        jnp.sum(cp_weights[1] * square_dalitz_log_jacobian(minus_model, minus_data))
+    )
+    np.testing.assert_allclose(
+        cp_nll["dalitz"] - cp_nll["square-dalitz"], cp_shift, rtol=1e-10
+    )
+    with pytest.raises(ValueError, match="strictly inside"):
+        sessions["square-dalitz"]._weighted_objective(
+            (jnp.ones(3), cp_weights[1])
+        )

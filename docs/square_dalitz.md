@@ -141,6 +141,16 @@ HESSE errors, covariances (including the weighted sandwich/SumW2 corrections) an
 therefore identical to the Dalitz-plot fit; only the NLL value changes. For CP fits the B+ and B-
 terms are added and the joint B+/B- normalization is unchanged.
 
+`|J|` vanishes on the Square-Dalitz boundary, so `log |J_i|` only exists for events strictly
+inside the physical region. `square_dalitz_log_jacobian` checks that `s_ij` and `s_ik` (the two
+invariants defining `(m', theta')`) are finite and lie inside the Dalitz limits, up to a
+roundoff-sized layer, *before* the coordinate transform clips its cosines to `[-1, 1]`; events on
+or outside the boundary raise `ValueError` instead of receiving a finite `log |J|` from
+`sin(pi) != 0`. The invariant sum is not checked, so stored single-precision `s12`/`s13`/`s23`
+branches are accepted exactly as in a Dalitz-plot fit. In an event-weighted fit, events with
+`w_i = 0` are dropped before this check, matching the weighted likelihoods, which ignore them
+even where the density is zero; any event with a non-zero weight is still validated.
+
 **Efficiencies and backgrounds.** The equality above holds for mixtures only if every component
 gains the same `|J|`:
 
@@ -157,13 +167,19 @@ gains the same `|J|`:
 mother_mass=..., masses=..., pair=...)` builds a sample from Square-Dalitz coordinates (amplitudes
 are evaluated from the invariants it computes), `sample.square_dalitz(...)` returns them, and
 `read_phase_space_sample(..., mprime="mp", thetaprime="thp", mother_mass=..., masses=...,
-pair=...)` reads them from ROOT (also through `FitSession.from_root`). Projections in
+pair=...)` reads them from ROOT (also through `FitSession.from_root`). Both reject coordinates
+that are not finite real vectors of matching shape in `[0, 1]`, and weights that are not a
+matching finite real vector (signed weights are allowed), before converting: the cosine map
+would otherwise fold an out-of-range `(m', theta')` silently onto another physical event.
+Projections in
 `(m', theta')` use `plot_projection(..., square_dalitz=True)`.
 
 `tests/test_square_dalitz_fit.py` fits the same toys in both coordinates (single sample and CP,
 with Square-Dalitz efficiency and background, and with a mass-plane normalization plus an
 explicit `square_dalitz_pair`) and checks equal values and errors and an NLL difference of
-`sum_i log |J_i|`.
+`sum_i log |J_i|`. It also checks that boundary/outside events and out-of-range `(m', theta')`
+input are rejected, and that zero-weight boundary events are ignored by weighted single-sample
+and CP fits.
 
 Changing the *normalization method* (e.g. Monte Carlo to Square-Dalitz quadrature) is a separate
 choice: it shifts the integrals at the quadrature/MC-statistics level, which can move a

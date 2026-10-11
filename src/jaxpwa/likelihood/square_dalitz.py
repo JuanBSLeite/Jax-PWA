@@ -8,6 +8,7 @@ from dataclasses import dataclass
 import jax.numpy as jnp
 from jax import Array
 
+from jaxpwa.kinematics.dalitz_grid import dalitz_s13_limits
 from jaxpwa.kinematics.square_dalitz import (
     invariants_to_square_dalitz,
     square_dalitz_jacobian,
@@ -45,13 +46,54 @@ def square_dalitz_log_jacobian(model, data, *, pair=None) -> Array:
     evaluated at the events of ``data`` (a ``PhaseSpaceSample`` or a mapping
     with ``s12``, ``s13``, ``s23``). A density in ``(m', theta')`` is the
     Dalitz-plot density times ``|J|``. Events on or outside the Square-Dalitz
-    boundary (``|J| = 0``) raise ``ValueError``.
+    boundary (within floating-point roundoff) raise ``ValueError``. The
+    invariants must be finite and the two that define ``(m', theta')``
+    (``s_ij`` of ``pair`` and ``s_ik``) must lie strictly inside the physical
+    region; validation happens before the coordinate transform clips its
+    cosines. The invariant sum is not checked, so stored single-precision
+    ``s12``/``s13``/``s23`` branches are accepted as on the Dalitz path.
     """
     pair = square_dalitz_pair(model, pair)
     values = data.as_dict() if hasattr(data, "as_dict") else data
     channel = model.channel
     mother_mass = float(channel.parent_mass)
     masses = tuple(float(m) for m in channel.daughter_masses)
+    invariants = {
+        key: jnp.asarray(values[key]) for key in ("s12", "s13", "s23")
+    }
+    if (
+        len({v.shape for v in invariants.values()}) != 1
+        or any(jnp.iscomplexobj(v) for v in invariants.values())
+    ):
+        raise ValueError("Dalitz invariants must be real arrays with matching shapes")
+    i, j = pair
+    k = next(index for index in range(3) if index not in pair)
+
+    def invariant(a, b):
+        a, b = sorted((a, b))
+        return invariants[f"s{a + 1}{b + 1}"]
+
+    s_ij, s_ik = invariant(i, j), invariant(i, k)
+    low, high = dalitz_s13_limits(
+        s_ij, mother_mass=mother_mass, masses=(masses[i], masses[j], masses[k])
+    )
+    total = mother_mass**2 + sum(m * m for m in masses)
+    # Boundary arithmetic loses a few ulps. Reject that roundoff-sized layer
+    # rather than relying on sin(pi) being exactly zero.
+    tolerance = 32 * jnp.finfo(low.dtype).eps * total
+    physical = (
+        (s_ij > (masses[i] + masses[j])**2 + tolerance)
+        & (s_ij < (mother_mass - masses[k])**2 - tolerance)
+        & (s_ik > low + tolerance)
+        & (s_ik < high - tolerance)
+    )
+    for value in invariants.values():
+        physical = physical & jnp.isfinite(value)
+    if not bool(jnp.all(physical)):
+        raise ValueError(
+            "events must have finite invariants strictly inside the physical "
+            "Square-Dalitz boundary"
+        )
     mprime, thetaprime = invariants_to_square_dalitz(
         values["s12"],
         values["s13"],
@@ -67,12 +109,26 @@ def square_dalitz_log_jacobian(model, data, *, pair=None) -> Array:
         masses=masses,
         pair=pair,
     )
-    if not bool(jnp.all(jacobian > 0.0)):
+    if not bool(jnp.all(jnp.isfinite(jacobian) & (jacobian > 0.0))):
         raise ValueError(
             "events on or outside the Square-Dalitz boundary have a zero Jacobian "
             "and no density in (m', theta')"
         )
     return jnp.log(jacobian)
+
+
+def _square_dalitz_log_jacobian_sum(model, data, *, pair=None, weights=None):
+    """Prepare the coordinate shift, ignoring zero-weight events before validation."""
+    if weights is not None:
+        weights = jnp.asarray(weights)
+        active = weights != 0
+        values = data.as_dict() if hasattr(data, "as_dict") else data
+        data = {key: jnp.asarray(values[key])[active] for key in ("s12", "s13", "s23")}
+        weights = weights[active]
+    log_jacobian = square_dalitz_log_jacobian(model, data, pair=pair)
+    if weights is not None:
+        log_jacobian = weights * log_jacobian
+    return jnp.sum(log_jacobian)
 
 
 @dataclass(frozen=True)

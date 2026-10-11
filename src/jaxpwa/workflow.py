@@ -41,7 +41,7 @@ from jaxpwa.kinematics import (
 from jaxpwa.likelihood import MultiBackgroundNLL, UnbinnedNLL, WeightedUnbinnedNLL
 from jaxpwa.likelihood.square_dalitz import (
     SquareDalitzNLL,
-    square_dalitz_log_jacobian,
+    _square_dalitz_log_jacobian_sum,
     validate_session_coordinates,
 )
 from jaxpwa.likelihood.weighted import (
@@ -655,12 +655,10 @@ class FitSession:
         """Wrap an event NLL for this session's ``coordinates``."""
         if self.coordinates == "dalitz":
             return nll
-        log_jacobian = square_dalitz_log_jacobian(
-            self.model, self.data, pair=self.square_dalitz_pair
+        shift = _square_dalitz_log_jacobian_sum(
+            self.model, self.data, pair=self.square_dalitz_pair, weights=weights
         )
-        if weights is not None:
-            log_jacobian = jnp.asarray(weights) * log_jacobian
-        return SquareDalitzNLL(nll, jnp.sum(log_jacobian))
+        return SquareDalitzNLL(nll, shift)
 
     @cached_property
     def objective(self):

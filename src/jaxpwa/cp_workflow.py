@@ -32,7 +32,7 @@ from jaxpwa.kinematics import (
 from jaxpwa.likelihood import CPJointNLL
 from jaxpwa.likelihood.square_dalitz import (
     SquareDalitzNLL,
-    square_dalitz_log_jacobian,
+    _square_dalitz_log_jacobian_sum,
     validate_session_coordinates,
 )
 from jaxpwa.likelihood.cp import _signal_yield_pair
@@ -312,12 +312,10 @@ class CPFitSession:
         for index, (model, data) in enumerate(
             ((self.plus_model, self.plus_data), (self.minus_model, self.minus_data))
         ):
-            log_jacobian = square_dalitz_log_jacobian(
-                model, data, pair=self.square_dalitz_pair
+            total = total + _square_dalitz_log_jacobian_sum(
+                model, data, pair=self.square_dalitz_pair,
+                weights=None if weights is None else weights[index],
             )
-            if weights is not None:
-                log_jacobian = jnp.asarray(weights[index]) * log_jacobian
-            total = total + jnp.sum(log_jacobian)
         return SquareDalitzNLL(nll, total)
 
     @cached_property

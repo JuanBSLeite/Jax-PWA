@@ -66,16 +66,37 @@ class PhaseSpaceSample:
         ``pair`` is the ordered daughter pair defining ``m'`` (the
         ``normalization_pair`` of a ``square-dalitz`` model). The invariants
         are what amplitudes are evaluated from; ``weights`` default to one.
+        Coordinates must be finite real vectors of the same shape in ``[0, 1]``.
+        Supplied weights must be an aligned finite real vector; signed weights
+        are allowed. Validation occurs on construction, before conversion.
         """
         from .square_dalitz import square_dalitz_to_invariants
 
+        mprime, thetaprime = jnp.asarray(mprime), jnp.asarray(thetaprime)
+        if mprime.ndim != 1 or thetaprime.shape != mprime.shape:
+            raise ValueError(
+                "Square-Dalitz coordinates must be vectors with matching shapes"
+            )
+        for coordinate in (mprime, thetaprime):
+            if jnp.iscomplexobj(coordinate) or not bool(jnp.all(
+                jnp.isfinite(coordinate) & (coordinate >= 0) & (coordinate <= 1)
+            )):
+                raise ValueError(
+                    "Square-Dalitz coordinates must be finite and real in [0, 1]"
+                )
+        if weights is None:
+            weights = jnp.ones(mprime.shape, dtype=float)
+        weights = jnp.asarray(weights)
+        if (
+            weights.shape != mprime.shape or jnp.iscomplexobj(weights)
+            or not bool(jnp.all(jnp.isfinite(weights)))
+        ):
+            raise ValueError("weights must be a matching finite real vector")
         s12, s13, s23 = square_dalitz_to_invariants(
-            jnp.asarray(mprime), jnp.asarray(thetaprime),
+            mprime, thetaprime,
             mother_mass=mother_mass, masses=masses, pair=pair,
         )
-        if weights is None:
-            weights = jnp.ones_like(s12)
-        return cls(s12=s12, s13=s13, s23=s23, weights=jnp.asarray(weights))
+        return cls(s12=s12, s13=s13, s23=s23, weights=weights)
 
     def square_dalitz(
         self,
