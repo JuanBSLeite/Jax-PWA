@@ -84,6 +84,16 @@ so HESSE one-parameter uncertainties correspond to `Delta NLL = 0.5`.
 
 `Minimizer` uses a default tolerance of `1e-4`. Fit validity must not be judged from `valid` or EDM alone: always compare the fitted NLL with known reference points in closure tests and inspect pulls/covariance quality.
 
+### Square-Dalitz coordinates
+
+`coordinates="square-dalitz"` on `FitSession`/`CPFitSession` fits the events as points of
+`(m', theta')` instead of the Dalitz plane: the NLL changes by the parameter-independent
+`-sum_i w_i log |J_i|`, so fitted values and errors are unchanged. Any normalization method
+works (`square_dalitz_pair` names the pair defining `m'` unless the model is
+Square-Dalitz-normalized). Requirements (dimensionless efficiencies, Dalitz-plot background
+densities) are in
+[square_dalitz.md](square_dalitz.md#fitting-in-square-dalitz-coordinates).
+
 ## Normalization samples
 
 By default, amplitude-component and PDF normalization integrals use mass-plane

@@ -298,7 +298,7 @@ class NonResonant:
 class DalitzAmplitude:
     """Direct amplitude depending on two Dalitz coordinates.
 
-    This declaration is intended for dynamics such as ``QMI2D`` that are not a
+    This declaration is intended for dynamics such as ``QMIPixel`` that are not a
     one-dimensional isobar lineshape and therefore act directly on the event's
     Dalitz invariants.
     """

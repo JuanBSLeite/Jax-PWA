@@ -1,23 +1,30 @@
 # Dynamics module structure
 
-One-dimensional resonance lineshapes are organized under `src/jaxpwa/dynamics/lineshape/`, with one physical model per file:
+Resonance lineshapes are organized under `src/jaxpwa/dynamics/lineshape/`, with one physical model per file. This includes the two-dimensional Dalitz amplitudes `QMIPixel` (`qmi_pixel.py`) and `PolarFormFactorSymNR` (`polar_form_factor_nr.py`), which are attached through `DalitzAmplitude` instead of `Resonance`:
 
 ```text
 dynamics/
   angular.py
   context.py
   resonance.py
-  qmi2d.py
+  sequential.py
   lineshape/
     __init__.py
     common.py
     relativistic_breit_wigner.py
     gounaris_sakurai.py
     flatte.py
+    babar_flatte.py
     pole.py
     lass.py
     kmatrix.py
     qmi.py
+    rescattering2.py
+    pipi_kk_rescattering.py
+    rho_omega.py
+    sympy.py
+    qmi_pixel.py
+    polar_form_factor_nr.py
 ```
 
 `common.py` contains only shared kinematic and Blatt-Weisskopf helpers. Public imports remain available from `jaxpwa` and `jaxpwa.dynamics`, so user code does not need to import implementation files directly.
@@ -99,7 +106,7 @@ coefficients; if pole masses or radii float, that transformation itself varies
 with those parameters. Model JSON export/import preserves the option; older
 specifications without it keep the default `True`.
 
-`QMI2D` remains at the `dynamics` level because it is a full two-dimensional Dalitz amplitude evaluated through `DalitzAmplitude`, rather than a one-dimensional `lineshape(mass, context)` plugin used by `Resonance`.
+`QMIPixel` remains at the `dynamics` level because it is a full two-dimensional Dalitz amplitude evaluated through `DalitzAmplitude`, rather than a one-dimensional `lineshape(mass, context)` plugin used by `Resonance`.
 
 `lineshape/sympy.py` provides the optional `SympyLineshape` adapter. It uses the
 same callable interface and parameter-resolution hooks; existing plugins and

@@ -215,7 +215,7 @@ efficiency = SquareDalitzHistogramEfficiency(
 
 Both raise at construction if the edges can't represent a folded domain
 (`x_edges != y_edges`, or `thetaprime_edges` extending past 0.5) — the same
-protection `QMI2D(folded=True)` already applies to its own `s12_edges`/
+protection `QMIPixel(folded=True)` already applies to its own `s12_edges`/
 `s13_edges`. `square_dalitz_efficiency_from_root`/`square_dalitz_background_from_root`
 and their plain-Dalitz equivalents accept `folded=True` too, for loading an
 already-folded histogram straight from a ROOT file. `plot_dalitz`/
@@ -245,7 +245,7 @@ grid itself (`SquareDalitzGrid`, `DecayModel`'s automatic normalization
 selection): halving that grid and doubling the result would only be correct
 if the *coherent amplitude* is itself exactly symmetric under the exchange,
 and nothing here can safely verify that for an arbitrary user model. The
-existing automatic `Resonance` symmetrization (or a `QMI2D(folded=True)`
+existing automatic `Resonance` symmetrization (or a `QMIPixel(folded=True)`
 component) already makes the full-domain integral correct without needing
 to fold it.
 

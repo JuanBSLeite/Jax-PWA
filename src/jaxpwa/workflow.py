@@ -39,6 +39,11 @@ from jaxpwa.kinematics import (
     invariants_to_square_dalitz,
 )
 from jaxpwa.likelihood import MultiBackgroundNLL, UnbinnedNLL, WeightedUnbinnedNLL
+from jaxpwa.likelihood.square_dalitz import (
+    SquareDalitzNLL,
+    _square_dalitz_log_jacobian_sum,
+    validate_session_coordinates,
+)
 from jaxpwa.likelihood.weighted import (
     sandwich_covariance_from_score_outer,
     sweight_covariance_from_hessians,
@@ -323,6 +328,20 @@ class FitSession:
     components owning floating dynamical parameters are reevaluated during the
     fit. Efficiency and veto values are likewise cached on the data and
     normalization samples.
+
+    ``coordinates="square-dalitz"`` fits the events as points of the
+    Square-Dalitz plane ``(m', theta')`` of the ordered daughter pair
+    ``square_dalitz_pair`` instead of ``(s_a, s_b)``: every event density is
+    per ``dm' dtheta'``, i.e. the NLL becomes :class:`~jaxpwa.SquareDalitzNLL`
+    of the Dalitz-plot one. The normalization integral is the same in any
+    coordinates, so any normalization method works; ``square_dalitz_pair``
+    defaults to the ``normalization_pair`` of a ``square-dalitz``-normalized
+    model and is required otherwise. The Jacobian is parameter-independent,
+    so fitted values and errors are those of the Dalitz-plot fit; only the NLL
+    value changes. Efficiencies stay
+    dimensionless and background shapes stay Dalitz-plot densities
+    (Square-Dalitz histogram backgrounds with ``divide_jacobian=True``),
+    which is checked on construction.
     """
 
     model: object
@@ -334,6 +353,19 @@ class FitSession:
     extended: bool = False
     signal_yield: object | None = None
     constraints: tuple[object, ...] = ()
+    coordinates: str = "dalitz"
+    square_dalitz_pair: tuple[int, int] | None = None
+
+    def __post_init__(self) -> None:
+        validate_session_coordinates(
+            self.coordinates,
+            pair=self.square_dalitz_pair,
+            models=(self.model,),
+            efficiencies=(self.efficiency,),
+            background_shapes=tuple(
+                getattr(background, "shape", None) for background in self.backgrounds
+            ),
+        )
 
     @classmethod
     def from_root(
@@ -349,9 +381,15 @@ class FitSession:
         extended: bool = False,
         signal_yield: object | None = None,
         constraints: Sequence[object] = (),
+        coordinates: str = "dalitz",
+        square_dalitz_pair: tuple[int, int] | None = None,
         **root_kwargs,
     ) -> "FitSession":
-        """Build a `FitSession` reading its data sample from a ROOT tree."""
+        """Build a `FitSession` reading its data sample from a ROOT tree.
+
+        ``root_kwargs`` go to :func:`~jaxpwa.read_phase_space_sample` (e.g.
+        ``mprime``/``thetaprime`` branches for Square-Dalitz input).
+        """
         data = read_phase_space_sample(file_path, tree, **root_kwargs)
         return cls(
             model=model,
@@ -363,6 +401,8 @@ class FitSession:
             extended=extended,
             signal_yield=signal_yield,
             constraints=tuple(constraints),
+            coordinates=coordinates,
+            square_dalitz_pair=square_dalitz_pair,
         )
 
     def with_efficiency(self, efficiency: object | None) -> "FitSession":
@@ -611,9 +651,18 @@ class FitSession:
             signal_yield=self.signal_yield,
         )
 
+    def _in_coordinates(self, nll, weights=None):
+        """Wrap an event NLL for this session's ``coordinates``."""
+        if self.coordinates == "dalitz":
+            return nll
+        shift = _square_dalitz_log_jacobian_sum(
+            self.model, self.data, pair=self.square_dalitz_pair, weights=weights
+        )
+        return SquareDalitzNLL(nll, shift)
+
     @cached_property
     def objective(self):
-        nll: object = self.base_objective
+        nll: object = self._in_coordinates(self.base_objective)
         if self.constraints:
             nll = ConstrainedNLL(nll, *self.constraints)
         return nll
@@ -643,7 +692,7 @@ class FitSession:
 
     def _weighted_objective(self, weights):
         """Weighted signal event term plus this session's constraints."""
-        nll: object = self._weighted_nll(weights)
+        nll: object = self._in_coordinates(self._weighted_nll(weights), weights)
         if self.constraints:
             nll = ConstrainedNLL(nll, *self.constraints)
         return nll

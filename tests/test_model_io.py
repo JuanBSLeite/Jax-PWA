@@ -1,3 +1,5 @@
+import json
+
 import jax.numpy as jnp
 import pytest
 
@@ -6,12 +8,14 @@ from jaxpwa import (
     QMI,
     CPFitSession,
     CPRealImag,
+    DalitzAmplitude,
     DecayChannel,
     DecayModel,
     FitSession,
     Flatte,
     NonResonant,
     Parameter,
+    QMIPixel,
     RealImag,
     Resonance,
     cp_models_from_spec,
@@ -403,3 +407,21 @@ def test_cp_models_with_fitted_values_updates_the_shared_coefficient():
     minus_dx = next(p for p in updated_minus.parameters if p.name == "dx")
     assert plus_dx.value == pytest.approx(0.3)
     assert minus_dx is plus_dx
+
+
+def test_model_spec_with_legacy_qmi2d_type_loads_as_qmipixel():
+    channel = DecayChannel("D+", ("pi-", "pi+", "pi+"))
+    edges = (0.0, 1.0, 2.0, 4.0)
+    field = QMIPixel(edges, edges, ((1.0,) * 3,) * 3, ((0.0, 0.1, 0.2),) * 3,
+                     interpolation="linear", folded=True)
+    model = DecayModel(channel, [DalitzAmplitude("pixels", field, RealImag(1.0, 0.0))],
+                       normalization_resolution=20)
+    spec = model_to_spec(model)
+    text = json.dumps(spec)
+    assert '"QMIPixel"' in text and '"QMI2D"' not in text
+
+    legacy = json.loads(text.replace('"QMIPixel"', '"QMI2D"'))
+    restored = model_from_spec(legacy)
+    restored_field = restored.components[0].dynamics
+    assert isinstance(restored_field, QMIPixel)
+    assert restored_field == field

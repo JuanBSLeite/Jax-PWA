@@ -1,4 +1,5 @@
-"""One-dimensional resonance lineshapes."""
+"""Resonance lineshapes, including the two-dimensional Dalitz amplitudes
+(``QMIPixel``, ``PolarFormFactorSymNR``) attached through ``DalitzAmplitude``."""
 
 from .babar_flatte import BaBarFlatte
 from .common import (
@@ -17,7 +18,9 @@ from .lass import LASS
 from .pole import Pole, SigmaPole
 from .sympy import SympyLineshape
 from .pipi_kk_rescattering import PipiKKRescattering
+from .polar_form_factor_nr import PolarFormFactorSymNR
 from .qmi import QMI
+from .qmi_pixel import QMIPixel, physical_bin_mask
 from .relativistic_breit_wigner import RelativisticBreitWigner
 from .rho_omega import RhoOmegaMixing
 from .rescattering2 import Rescattering2
@@ -30,7 +33,9 @@ __all__ = [
     "LASS",
     "Pole",
     "PipiKKRescattering",
+    "PolarFormFactorSymNR",
     "QMI",
+    "QMIPixel",
     "RelativisticBreitWigner",
     "RhoOmegaMixing",
     "Rescattering2",
@@ -43,4 +48,5 @@ __all__ = [
     "effective_pole_mass",
     "energy_dependent_width",
     "kallen",
+    "physical_bin_mask",
 ]

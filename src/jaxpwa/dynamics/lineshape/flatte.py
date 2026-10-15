@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from ...particle_properties import mass_gev
 from ..context import ResonanceContext
 
 
@@ -16,9 +17,18 @@ def _phase_space(mass, mass_a: float, mass_b: float):
     return jnp.sqrt(argument.astype(jnp.complex128))
 
 
+def _pdg_masses(*names: str) -> tuple[float, ...]:
+    """Final-state masses (GeV) of the presets, from the PDG table of ``particle``."""
+    return tuple(mass_gev(name) for name in names)
+
+
 @dataclass(frozen=True)
 class Flatte:
-    """Laura++ coupled two-channel Flatte lineshape."""
+    """Laura++ coupled two-channel Flatte lineshape.
+
+    The preset constructors take their final-state masses from the PDG table
+    of the ``particle`` package.
+    """
 
     g1: float
     g2: float
@@ -52,8 +62,7 @@ class Flatte:
     @classmethod
     def f0_980(cls):
         """Build the f0(980) Flatte with default BES couplings (pipi/KK channels)."""
-        mpi0, mpip = 0.1349768, 0.13957039
-        mkp, mk0 = 0.493677, 0.497611
+        mpi0, mpip, mkp, mk0 = _pdg_masses("pi0", "pi+", "K+", "K0")
         m0_ref = 0.965
         g1 = 0.165 / m0_ref
         return cls(g1=g1, g2=4.21 * g1, channel1=((mpi0, mpi0), (mpip, mpip)), channel2=((mkp, mkp), (mk0, mk0)))
@@ -61,19 +70,19 @@ class Flatte:
     @classmethod
     def k0star_1430_neutral(cls):
         """Build the neutral K0*(1430) Flatte with Laura++ default couplings."""
-        mk0, mkp, mpi0, mpip, metap = 0.497611, 0.493677, 0.1349768, 0.13957039, 0.95778
+        mk0, mkp, mpi0, mpip, metap = _pdg_masses("K0", "K+", "pi0", "pi+", "eta'(958)")
         return cls(0.304, 0.380, ((mk0, mpi0), (mkp, mpip)), ((mk0, metap), (mk0, metap)), 0.234)
 
     @classmethod
     def k0star_1430_charged(cls):
         """Build the charged K*(1430) Flatte with Laura++ default couplings."""
-        mk0, mkp, mpi0, mpip, metap = 0.497611, 0.493677, 0.1349768, 0.13957039, 0.95778
+        mk0, mkp, mpi0, mpip, metap = _pdg_masses("K0", "K+", "pi0", "pi+", "eta'(958)")
         return cls(0.304, 0.380, ((mkp, mpi0), (mk0, mpip)), ((mkp, metap), (mkp, metap)), 0.234)
 
     @classmethod
     def a0_980_neutral(cls):
         """Build the neutral a0(980) Flatte with Laura++ default couplings."""
-        meta, mpi0, mkp, mk0 = 0.547862, 0.1349768, 0.493677, 0.497611
+        meta, mpi0, mkp, mk0 = _pdg_masses("eta", "pi0", "K+", "K0")
         m0_ref = 0.999
         g1 = 0.105 / m0_ref
         return cls(g1, 1.03 * g1, ((meta, mpi0), (meta, mpi0)), ((mkp, mkp), (mk0, mk0)))
@@ -81,7 +90,7 @@ class Flatte:
     @classmethod
     def a0_980_charged(cls):
         """Build the charged a0(980) Flatte with Laura++ default couplings."""
-        meta, mpip, mkp, mk0 = 0.547862, 0.13957039, 0.493677, 0.497611
+        meta, mpip, mkp, mk0 = _pdg_masses("eta", "pi+", "K+", "K0")
         m0_ref = 0.999
         g1 = 0.105 / m0_ref
         return cls(g1, 1.03 * g1, ((meta, mpip), (meta, mpip)), ((mkp, mk0), (mkp, mk0)))

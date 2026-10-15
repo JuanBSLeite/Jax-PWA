@@ -7,10 +7,10 @@ import pytest
 
 from jaxpwa import (
     QMI,
-    QMI2D,
     DecayChannel,
     DecayModel,
     Parameter,
+    QMIPixel,
     RealImag,
     Resonance,
     enable_x64,
@@ -81,7 +81,7 @@ def test_distinct_qmi_grids_are_independent_of_component_order(interpolation, fl
 
 
 @pytest.mark.parametrize("bad", [float("nan"), float("inf"), -float("inf")])
-def test_qmi_rejects_nonfinite_knots_and_qmi2d_edges(bad):
+def test_qmi_rejects_nonfinite_knots_and_qmi_pixel_edges(bad):
     with pytest.raises(ValueError, match="finite"):
         QMI(
             knots=(0.3, bad, 1.6),
@@ -90,7 +90,7 @@ def test_qmi_rejects_nonfinite_knots_and_qmi2d_edges(bad):
         )
     for xedges, yedges in [((0.2, bad), (0.2, 1.0)), ((0.2, 1.0), (0.2, bad))]:
         with pytest.raises(ValueError, match="finite"):
-            QMI2D(xedges, yedges, ((1.0,),), ((0.0,),))
+            QMIPixel(xedges, yedges, ((1.0,),), ((0.0,),))
 
 
 @pytest.mark.parametrize("polar", [False, True])
@@ -107,16 +107,16 @@ def test_qmi_rejects_generic_free_parameters_in_both_groups(polar, second_group)
         QMI(knots=(0.3, 1.6), **kwargs)
 
 
-def test_qmi2d_rejects_generic_free_parameters():
+def test_qmi_pixel_rejects_generic_free_parameters():
     for mag, phase in [
         (((Parameter("a", 1.0),),), ((0.0,),)),
         (((1.0,),), ((Parameter("phi", 0.0),),)),
     ]:
         with pytest.raises(ValueError, match=r"Parameter.dynamics"):
-            QMI2D((0.2, 1.0), (0.2, 1.0), mag, phase)
+            QMIPixel((0.2, 1.0), (0.2, 1.0), mag, phase)
 
 
 def test_fixed_generic_nodes_remain_supported():
     fixed = Parameter("fixed", 1.0, fixed=True)
     QMI((0.3, 1.6), magnitudes=(fixed, 0.5), phases=(0.0, 0.2))
-    QMI2D((0.2, 1.0), (0.2, 1.0), ((fixed,),), ((0.0,),))
+    QMIPixel((0.2, 1.0), (0.2, 1.0), ((fixed,),), ((0.0,),))

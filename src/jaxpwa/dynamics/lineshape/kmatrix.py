@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import jax.numpy as jnp
 
+from ...particle_properties import mass_gev
 from ..context import ResonanceContext
 
 _POLE_MASSES = jnp.asarray([0.65100, 1.20360, 1.55817, 1.21000, 1.82206])
@@ -22,10 +23,9 @@ _S0_PROD = -3.0
 _M_SQ0 = 1.0
 _S_A = 1.0
 _S_A0 = -0.15
-_MPI = 0.13957039
-_MK = 0.493677
-_META = 0.547862
-_METAP = 0.95778
+# PDG names of the final-state masses (pi, K, eta, eta') entering rho(s).
+_MASS_PARTICLES = (("pion_mass", "pi+"), ("kaon_mass", "K+"), ("eta_mass", "eta"),
+                   ("eta_prime_mass", "eta'(958)"))
 
 
 def _complex_value(value):
@@ -41,21 +41,22 @@ def _two_body_rho(s, mass1, mass2):
     return jnp.sqrt(argument.astype(jnp.complex128))
 
 
-def _four_pi_rho(s):
+def _four_pi_rho(s, mpi):
     s = jnp.asarray(s)
     low = 1.2274 + 0.00370909 / s**2 - 0.111203 / s - 6.39017 * s + 16.8358 * s**2 - 21.8845 * s**3 + 11.3153 * s**4
-    continuity = jnp.sqrt(1.0 - 16.0 * _MPI**2)
-    high = jnp.sqrt((1.0 - 16.0 * _MPI**2 / s).astype(jnp.complex128))
+    continuity = jnp.sqrt(1.0 - 16.0 * mpi**2)
+    high = jnp.sqrt((1.0 - 16.0 * mpi**2 / s).astype(jnp.complex128))
     return jnp.where(s <= 1.0, continuity * low + 0.0j, high)
 
 
-def _phase_space_vector(s):
+def _phase_space_vector(s, masses):
+    mpi, mk, meta, metap = masses
     return jnp.stack([
-        _two_body_rho(s, _MPI, _MPI),
-        _two_body_rho(s, _MK, _MK),
-        _four_pi_rho(s),
-        _two_body_rho(s, _META, _META),
-        _two_body_rho(s, _META, _METAP),
+        _two_body_rho(s, mpi, mpi),
+        _two_body_rho(s, mk, mk),
+        _four_pi_rho(s, mpi),
+        _two_body_rho(s, meta, meta),
+        _two_body_rho(s, meta, metap),
     ], axis=-1)
 
 
@@ -69,10 +70,10 @@ def _slowly_varying_factor(s, s0, m_sq0=_M_SQ0):
     return (m_sq0 - s0) / (s - s0)
 
 
-def _adler_factor(s):
+def _adler_factor(s, mpi):
     # Laura++: (s - sAConst) * (1 - sA0) / (s - sA0), with
     # sAConst = 0.5 * sA * m_pi^2.
-    s_a_const = 0.5 * _S_A * _MPI**2
+    s_a_const = 0.5 * _S_A * mpi**2
     return (s - s_a_const) * (1.0 - _S_A0) / (s - _S_A0)
 
 
@@ -88,7 +89,7 @@ def _stable_inverse_denominators(s):
     return 1.0 / regularized
 
 
-def _scattering_matrix_from_inverse(s, inverse_denominators):
+def _scattering_matrix_from_inverse(s, inverse_denominators, mpi):
     pole_terms = jnp.einsum(
         "...a,au,av->...uv",
         inverse_denominators,
@@ -101,22 +102,22 @@ def _scattering_matrix_from_inverse(s, inverse_denominators):
     smooth = f_scatt * _slowly_varying_factor(
         s[..., None, None], _S0_SCATT
     )
-    return (pole_terms + smooth) * _adler_factor(s)[..., None, None]
+    return (pole_terms + smooth) * _adler_factor(s, mpi)[..., None, None]
 
 
-def _scattering_matrix(s):
+def _scattering_matrix(s, mpi):
     s = jnp.asarray(s)
-    return _scattering_matrix_from_inverse(s, _stable_inverse_denominators(s))
+    return _scattering_matrix_from_inverse(s, _stable_inverse_denominators(s), mpi)
 
 
-def _kernel(mass):
+def _kernel(mass, masses):
     mass = jnp.asarray(mass)
     s = mass**2
     inverse_denominators = _stable_inverse_denominators(s)
     k_matrix = _scattering_matrix_from_inverse(
-        s, inverse_denominators
+        s, inverse_denominators, masses[0]
     ).astype(jnp.complex128)
-    rho = _phase_space_vector(s)
+    rho = _phase_space_vector(s, masses)
     kernel = jnp.eye(5, dtype=jnp.complex128) - 1j * k_matrix * rho[..., None, :]
     return s, inverse_denominators, k_matrix, rho, kernel
 
@@ -126,24 +127,37 @@ class KMatrix:
     betas: tuple[object, object, object, object, object] = (1.0+0.0j, 0.0+0.0j, 0.0+0.0j, 0.0+0.0j, 0.0+0.0j)
     f_prod: tuple[object, object, object, object, object] = (0.0+0.0j, 0.0+0.0j, 0.0+0.0j, 0.0+0.0j, 0.0+0.0j)
     s0_prod: object = _S0_PROD
+    # Final-state masses (GeV) of the phase-space factors; None takes the PDG
+    # value from the ``particle`` package.
+    pion_mass: float | None = None
+    kaon_mass: float | None = None
+    eta_mass: float | None = None
+    eta_prime_mass: float | None = None
 
     def __post_init__(self) -> None:
+        for field_name, particle in _MASS_PARTICLES:
+            if getattr(self, field_name) is None:
+                object.__setattr__(self, field_name, mass_gev(particle))
         if len(self.betas) != 5:
             raise ValueError("KMatrix requires five production pole coefficients")
         if len(self.f_prod) != 5:
             raise ValueError("KMatrix requires five production SVP coefficients")
 
+    @property
+    def _masses(self):
+        return (self.pion_mass, self.kaon_mass, self.eta_mass, self.eta_prime_mass)
+
     def phase_space(self, mass):
         """Return the five-channel phase-space vector rho(s) at each mass."""
-        return _phase_space_vector(jnp.asarray(mass) ** 2)
+        return _phase_space_vector(jnp.asarray(mass) ** 2, self._masses)
 
     def scattering_matrix(self, mass):
         """Return the 5x5 real scattering K-matrix at each mass."""
-        return _scattering_matrix(jnp.asarray(mass) ** 2)
+        return _scattering_matrix(jnp.asarray(mass) ** 2, self.pion_mass)
 
     def scattering_amplitude(self, mass):
         """Return the 5x5 complex T-matrix, T = (I - i K rho)^-1 K, at each mass."""
-        _, _, k_matrix, _, kernel = _kernel(mass)
+        _, _, k_matrix, _, kernel = _kernel(mass, self._masses)
         return jnp.linalg.solve(kernel, k_matrix)
 
     def s_matrix(self, mass):
@@ -184,7 +198,7 @@ class KMatrix:
         """
 
         del context
-        _, _, _, _, kernel = _kernel(mass)
+        _, _, _, _, kernel = _kernel(mass, self._masses)
         rhs = jnp.zeros(kernel.shape[:-1] + (1,), dtype=jnp.complex128)
         rhs = rhs.at[..., 0, 0].set(1.0 + 0.0j)
         response_column = jnp.linalg.solve(
@@ -202,7 +216,7 @@ class KMatrix:
     def amplitude_vector(self, mass):
         """Return the full five-channel amplitude vector F = (I - i K rho)^-1 P."""
         mass = jnp.asarray(mass)
-        s, inverse_denominators, _, _, kernel = _kernel(mass)
+        s, inverse_denominators, _, _, kernel = _kernel(mass, self._masses)
         production = self._production_vector_from_inverse(s, inverse_denominators)
         return jnp.linalg.solve(kernel, production[..., :, None])[..., 0]
 

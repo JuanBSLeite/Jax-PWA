@@ -246,6 +246,11 @@ def read_phase_space_sample(
     cut: str | None = None,
     entry_start: int | None = None,
     entry_stop: int | None = None,
+    mprime: str | None = None,
+    thetaprime: str | None = None,
+    mother_mass: float | None = None,
+    masses: tuple[float, float, float] | None = None,
+    pair: tuple[int, int] | None = None,
 ) -> PhaseSpaceSample:
     """Read a ROOT TTree directly into a ``PhaseSpaceSample``.
 
@@ -254,8 +259,27 @@ def read_phase_space_sample(
     when given, are each a 4-branch sequence ordered ``(E, px, py, pz)`` for
     that daughter's four-momentum -- all three or none must be supplied.
     ``cut``/``entry_start``/``entry_stop`` are forwarded to ``read_root_tree``.
+
+    For events stored in Laura++ Square-Dalitz coordinates, name the
+    ``mprime`` and ``thetaprime`` branches instead (with ``mother_mass``,
+    ``masses`` and the ordered ``pair`` defining ``m'``); the invariants are
+    then computed with :meth:`PhaseSpaceSample.from_square_dalitz` and the
+    ``s12``/``s13``/``s23`` branch names are ignored.
     """
-    branch_map: dict[str, str] = {"s12": s12, "s13": s13, "s23": s23}
+    square_input = mprime is not None or thetaprime is not None
+    if square_input:
+        if None in (mprime, thetaprime, mother_mass, masses, pair):
+            raise ValueError(
+                "Square-Dalitz input requires mprime, thetaprime, mother_mass, "
+                "masses and pair"
+            )
+        if any(spec is not None for spec in (p1, p2, p3)):
+            raise ValueError(
+                "four-momenta cannot be read together with Square-Dalitz input"
+            )
+        branch_map: dict[str, str] = {"mprime": mprime, "thetaprime": thetaprime}
+    else:
+        branch_map = {"s12": s12, "s13": s13, "s23": s23}
     if weight is not None:
         branch_map["weight"] = weight
 
@@ -283,9 +307,15 @@ def read_phase_space_sample(
         entry_start=entry_start,
         entry_stop=entry_stop,
     )
-    size = int(arrays["s12"].shape[0])
+    size = int(next(iter(arrays.values())).shape[0])
     if any(int(arr.shape[0]) != size for arr in arrays.values()):
         raise ValueError("ROOT input branches have inconsistent lengths")
+    if square_input:
+        return PhaseSpaceSample.from_square_dalitz(
+            arrays["mprime"], arrays["thetaprime"],
+            mother_mass=mother_mass, masses=tuple(masses), pair=tuple(pair),
+            weights=arrays.get("weight"),
+        )
 
     def momentum(label: str) -> Array | None:
         if momentum_specs[label] is None:

@@ -37,7 +37,7 @@ and [closure notebook](../notebooks/tutorials/tutorial_66_four_body_closure.ipyn
 | `DecayModel` | class | Build a coherent amplitude model with deterministic Dalitz-plane normalization; `with_fixed_parameters(...)` fixes selected parameters in a new model. |
 | `Resonance` | class | Declarative one-dimensional resonance component; `from_particle(...)` uses the same nominal-property resolver as `Isobar`, with interchangeable `lineshape`/`angular` plugins and form-factor conventions. |
 | `NonResonant` | class | Constant (S-wave, isotropic) non-resonant component with a complex coefficient. |
-| `DalitzAmplitude` | class | Attach a genuinely two-dimensional amplitude (e.g. `QMI2D`) that depends on both Dalitz invariants at once, bypassing the isobar construction. |
+| `DalitzAmplitude` | class | Attach a genuinely two-dimensional amplitude (e.g. `QMIPixel`) that depends on both Dalitz invariants at once, bypassing the isobar construction. |
 | `AmplitudeComponent` | class | Named dynamical component `F_i(x)` with a coefficient; the base type `Resonance`/`NonResonant`/`DalitzAmplitude` all produce. |
 | `CoherentAmplitudeModel` | class | Coherent sum `A(x) = sum_i c_i F_i(x)` of prepared components. |
 | `ConstantAmplitude` | class | Non-resonant constant dynamical amplitude (the piece `NonResonant` wraps). |
@@ -107,11 +107,11 @@ Docs: `docs/dynamics_structure.md`, `docs/lineshapes.md`.
 
 | Name | Kind | What it does |
 |---|---|---|
-| `QMI2D` | class | Complex amplitude field defined bin-by-bin over `(s12, s13)`; three interpolation modes (`none`/`linear`/`cubic`), optional identical-particle folding. |
-| `physical_bin_mask` | function | Mark which `QMI2D` grid cells intersect the physical Dalitz boundary, using the exact analytic boundary. |
+| `QMIPixel` | class | Complex amplitude field defined bin-by-bin over `(s12, s13)` or, with `coordinates="square-dalitz"`, over the Square-Dalitz `(m', theta')`; three interpolation modes (`none`/`linear`/`cubic`), optional identical-particle folding. |
+| `physical_bin_mask` | function | Mark which `QMIPixel` grid cells intersect the physical Dalitz boundary, using the exact analytic boundary. |
 | `PolarFormFactorSymNR` | class | Laura++ `LauPolarFormFactorSymNR` nonresonant amplitude for symmetric Dalitz plots, `1/(1+s/lambda^2) + 1/(1+t/lambda^2)` (or the `min(s,t)` no-interference form). |
 
-Docs: `docs/lineshapes.md` ("QMI2D Dalitz amplitude", "Polar form-factor nonresonant amplitude").
+Docs: `docs/lineshapes.md` ("QMIPixel Dalitz amplitude", "Polar form-factor nonresonant amplitude").
 
 ## Kinematics and phase space
 
@@ -162,6 +162,8 @@ These are what `FitSession`/`CPFitSession` compose automatically; use them direc
 | `SCFSignalPDF` | class | Signal PDF including correctly-reconstructed *and* self-cross-feed (SCF) migrated events. |
 | `MultiBackgroundNLL` | class | Unbinned NLL: signal plus an arbitrary number of named background categories (non-CP). |
 | `WeightedUnbinnedNLL` | class | Weighted unbinned NLL `-sum_i w_i log p(x_i)` for an externally-weighted `logpdf` (e.g. sWeights); does not implement the covariance correction needed for statistically valid HESSE errors on such fits. |
+| `SquareDalitzNLL` | class | Express a Dalitz-plot NLL as an NLL of densities in Square-Dalitz `(m', theta')`: subtracts the parameter-independent `sum_i w_i log|J_i|`; what `FitSession`/`CPFitSession(coordinates="square-dalitz")` minimize. |
+| `square_dalitz_log_jacobian` | function | Per-event `log|J(m', theta')|` of a `square-dalitz`-normalized model's Square-Dalitz map at a sample's events. |
 | `NeutralMesonMixing` | class | Exact neutral-meson time kernel with x, y, lifetime and complex q/p; see [time-dependent fits](time_dependent.md). |
 | `TimeDependentMixtureNLL` | class | Multiple normalized Dalitz-time backgrounds with floating fractions or extended yields and component tag probabilities; see `docs/time_dependent.md`. |
 | `TimeDependentDalitzNLL` | class | Tagged time-dependent Dalitz signal NLL, coherent A/Abar overlap, factorized acceptance and optional Gaussian time resolution; see [time-dependent fits](time_dependent.md). |
@@ -253,7 +255,7 @@ automatically, returning `(result, updated_model)`/`(result, plus_model, minus_m
 plain `result` (default `False`, existing callers are unaffected).
 
 Only the built-in jaxpwa component/plugin classes (`Resonance`/`NonResonant`/
-`DalitzAmplitude`, every lineshape and angular model, `RealImag`/`CPRealImag`, `QMI2D`) round-trip;
+`DalitzAmplitude`, every lineshape and angular model, `RealImag`/`CPRealImag`, `QMIPixel`) round-trip;
 a custom plugin needs its own `to_spec`/`from_spec` pair, as `SympyLineshape` already provides.
 `normalization_method="toy-mc"` is not supported, since its external `normalization_sample` is not
 part of the specification. None of these capture a session's `data`/`efficiency`/`veto`/

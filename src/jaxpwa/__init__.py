@@ -46,7 +46,7 @@ from .discriminants import (
 from .dynamics import (
     LASS,
     QMI,
-    QMI2D,
+    QMIPixel,
     BaBarFlatte,
     CascadeChain,
     CovariantAngular,
@@ -129,9 +129,11 @@ from .likelihood import (
     NeutralMesonMixing,
     TimeDependentBackgroundCategory,
     TimeDependentDalitzNLL,
+    SquareDalitzNLL,
     TimeDependentMixtureNLL,
     WeightedUnbinnedNLL,
     YieldAsymmetry,
+    square_dalitz_log_jacobian,
 )
 from .observables import delta_method_covariance, delta_method_errors, delta_method_jacobian
 from .pdf import SCFSignalPDF, SignalPDF
@@ -201,10 +203,10 @@ __all__ = [
     "GooFitLegacyAngular", "GounarisSakurai", "Histogram1D", "KMatrix", "LASS", "LineshapeIntensity1D", "DalitzGaussLegendreGrid",
     "MassWindowVeto", "Minimizer", "MultiBackgroundNLL", "MultiStartResult", "NesterovResult", "NonResonant",
     "Parameter", "ParameterKind", "PhaseSpaceMC", "PhaseSpaceSample", "Pole", "PointToPointResult",
-    "PreparedAmplitudeCache", "PreparedInverseToyGenerator", "PipiKKRescattering", "PolarFormFactorSymNR", "QMI", "QMI2D", "QMISmoothnessConstraint", "RealImag", "RelativisticBreitWigner", "RhoOmegaMixing", "Rescattering2", "SigmaPole", "SympyLineshape",
+    "PreparedAmplitudeCache", "PreparedInverseToyGenerator", "PipiKKRescattering", "PolarFormFactorSymNR", "QMI", "QMIPixel", "QMISmoothnessConstraint", "RealImag", "RelativisticBreitWigner", "RhoOmegaMixing", "Rescattering2", "SigmaPole", "SympyLineshape",
     "Resonance", "ResonanceAmplitude", "ResonanceContext", "SCFSignalPDF", "SignalPDF",
     "SparseMigration", "SquareDalitzGrid", "SquareDalitzHistogramBackground", "SquareDalitzHistogramEfficiency", "SumPDF1D",
-    "SquareDalitzSCFMap", "ToyBackground", "VetoMap", "VetoedDensity", "WeightedUnbinnedNLL", "ZemachP", "ZemachPstar",
+    "SquareDalitzSCFMap", "ToyBackground", "VetoMap", "VetoedDensity", "WeightedUnbinnedNLL", "SquareDalitzNLL", "square_dalitz_log_jacobian", "ZemachP", "ZemachPstar",
     "Zemach_P", "Zemach_Pstar",
     "boost_to_rest_frame", "binned_data", "chi2_from_histograms", "covariant_kinematics",
     "covariant_kinematics_from_invariants", "dalitz_s13_limits",

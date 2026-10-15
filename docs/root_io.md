@@ -52,6 +52,17 @@ data = read_phase_space_sample(
 
 If no weight branch is supplied, all event weights are one. Optional four-momenta use `(E, px, py, pz)` branch tuples for `p1`, `p2` and `p3`. `entry_start`, `entry_stop` and uproot `cut` are supported.
 
+Events stored in Square-Dalitz coordinates are read by naming the `m'` and `theta'` branches
+instead of the invariants; the ordered `pair` defining `m'` and the channel masses are required:
+
+```python
+data = read_phase_space_sample(
+    "data.root", "DecayTree",
+    mprime="mPrime", thetaprime="thPrime",
+    mother_mass=channel.parent_mass, masses=channel.daughter_masses, pair=(1, 2),
+)
+```
+
 ## ROOT histograms in ordinary Dalitz coordinates
 
 ```python

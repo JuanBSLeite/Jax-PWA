@@ -169,7 +169,7 @@ def plot_dalitz(
         if auto_folded_range:
             # Force identical bin edges on both axes -- the same
             # x_edges==y_edges convention `HistogramEfficiency`/
-            # `HistogramBackground`/`QMI2D` already require for a folded
+            # `HistogramBackground`/`QMIPixel` already require for a folded
             # domain. Without it, matplotlib's `hist2d` autoscales each axis
             # to its own data range; since folding systematically sends the
             # smaller of the pair to `x_values` and the larger to
