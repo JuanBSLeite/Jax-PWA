@@ -90,7 +90,9 @@ works (`square_dalitz_pair` names the pair defining `m'`, defaulting to the `nor
 of a Square-Dalitz-normalized model). It is exact for mixtures only because efficiencies are
 dimensionless and background shapes are Dalitz-plot densities (Square-Dalitz histogram backgrounds
 with `divide_jacobian=True`); the sessions enforce this. `QMIPixel(coordinates="square-dalitz")` is
-independent: it puts the pixel grid itself on `(m', theta')`. See `docs/square_dalitz.md`.
+independent: it puts the pixel grid itself on `(m', theta')`. Events on or outside the
+Square-Dalitz boundary (where `|J| = 0`) raise `ValueError` instead of getting a finite `log |J|`;
+in weighted fits, zero-weight events are dropped before that check. See `docs/square_dalitz.md`.
 
 ### Two API layers, by design
 
